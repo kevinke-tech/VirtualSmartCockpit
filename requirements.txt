@@ -1,0 +1,9 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-dotenv>=1.0
+httpx>=0.27
+numpy>=1.24
+pydantic>=2.0
+
+# Offline ASR (same stack as sibling vui project)
+funasr>=1.0

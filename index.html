@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>汽车虚拟座舱 · Virtual Smart Cockpit</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="css/cockpit.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body class="theme-sr">
+  <header class="topbar">
+    <div
+      id="dmsStatusPill"
+      class="dms-status-pill dms-status-pill--on"
+      role="status"
+      aria-live="polite"
+      aria-label="驾驶员监测已开启"
+    >
+      DMS · 开启
+    </div>
+    <div class="tb-brand">
+      <span class="brand-mark" aria-hidden="true">◎</span>
+      <div class="brand-copy">
+        <span class="brand-title">Smart Cockpit</span>
+        <span class="brand-sub">模拟 · 汽车行驶页面</span>
+      </div>
+    </div>
+    <div id="clockBar" class="clock-bar"></div>
+    <div id="voiceStatus" class="voice-pill">
+      <span class="mic-icon">🎤</span>
+      <span class="status-text">语音：点击右下角球体</span>
+    </div>
+    <div id="toastLine" class="toast-line"></div>
+    <div class="tb-gauges">
+      <span class="sig-pill">蓝牙</span>
+      <span class="bat-pill">续航 <strong>85%</strong></span>
+    </div>
+  </header>
+
+  <main class="layout sr-layout">
+    <section id="leftStack" class="left-stack">
+      <article id="navCard" class="card glass nav-card sr-nav">
+        <div class="sr-nav-kicker">领航辅助 · 导航</div>
+        <div class="sr-maneuver">
+          <span class="sr-turn">↗</span>
+          <div class="sr-dist">
+            <span id="navNextManeuverBig" class="sr-dist-num">>99 km</span>
+            <span class="sr-dist-label">距下一动作</span>
+          </div>
+        </div>
+        <div class="lane-hint">保持三车道 · 中间车道推荐</div>
+
+        <div class="nav-meta">
+          <span>前往 <strong id="navDest">公司</strong></span>
+        </div>
+        <div class="nav-stats">
+          剩余 <strong id="navRemainKm">90</strong> / 总 <span id="navTotalKm">100</span> km ·
+          剩余 <strong id="navRemainMin">68</strong> / 总 <span id="navTotalMin">75</span> 分
+        </div>
+        <div class="progress-wrap"><div id="navProgress" class="progress-bar"></div></div>
+        <h3 class="sub">途经点</h3>
+        <ul id="waypointList" class="waypoints"></ul>
+      </article>
+
+      <article id="musicPanel" class="card glass music-panel" aria-labelledby="musicPanelTitle">
+        <div class="music-panel__head">
+          <h3 id="musicPanelTitle" class="music-panel__title">音乐播放</h3>
+          <button type="button" id="btnMusicExit" class="music-exit cockpit-nointeract" title="停止播放">
+            停止
+          </button>
+        </div>
+        <p class="music-hint">侧栏常显，与导航、读信息一致；可说「听歌」「退出音乐」，或用下方控件。</p>
+        <p id="musicTitle" class="music-line">—</p>
+        <p id="musicArtist" class="music-meta">—</p>
+        <p id="musicAlbum" class="music-meta">—</p>
+        <p id="musicLyric" class="music-lyric">（演示流媒体 · 可说「听歌」或点播放）</p>
+        <div class="music-progress"><div id="musicProgress" class="music-progress-inner"></div></div>
+        <div class="music-controls cockpit-nointeract">
+          <button type="button" id="btnMusicPrev">上一首</button>
+          <button type="button" id="btnMusicPlay">播放/暂停</button>
+          <button type="button" id="btnMusicNext">下一首</button>
+          <button type="button" id="volDown">音量−</button>
+          <button type="button" id="volUp">音量+</button>
+        </div>
+        <audio id="cockpitMusic" playsinline preload="none"></audio>
+      </article>
+
+      <article id="messageCard" class="card glass message-card" aria-labelledby="msgCardTitle">
+        <div class="message-card__head">
+          <h3 id="msgCardTitle" class="message-card__title">读信息 / 回复信息</h3>
+        </div>
+        <div class="message-card__pop" role="region" aria-label="最近一条消息预览">
+          <div class="message-card__avatar" aria-hidden="true">友</div>
+          <p id="msgCardFrom" class="message-card__from">来自 —</p>
+          <p id="msgCardMeta" class="message-card__meta"></p>
+          <p id="msgCardBody" class="message-card__body">—</p>
+          <p id="msgCardLastReply" class="message-card__last-reply hidden"></p>
+          <div class="message-card__actions">
+            <button type="button" class="message-card__btn-send" id="btnMsgDemoSend">
+              <span class="message-card__btn-ico" aria-hidden="true">✈</span> Send
+            </button>
+            <button type="button" class="message-card__btn-edit" id="btnMsgDemoChange">
+              <span class="message-card__btn-ico" aria-hidden="true">✎</span> Change
+            </button>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <section class="right-stack viewport-3d">
+      <div class="road-shell">
+        <video id="dmsCam" class="dms-cam-sensor" playsinline muted autoplay></video>
+        <div id="road3dHost" class="road-3d-host"></div>
+
+        <div class="viewport-hud">
+          <div id="adasPill" class="adas-pill hidden">
+            <span id="adasPillIco" class="adas-ico">↰</span>
+            <span id="adasPillLabel">左侧超车</span>
+          </div>
+          <div class="speed-ring" aria-label="当前车速">
+            <svg viewBox="0 0 120 120" class="ring-svg">
+              <defs>
+                <linearGradient id="cockpitRingGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" style="stop-color:#38bdf8" />
+                  <stop offset="100%" style="stop-color:#0284c7" />
+                </linearGradient>
+              </defs>
+              <circle class="ring-bg" cx="60" cy="60" r="52" />
+              <circle class="ring-fg" cx="60" cy="60" r="52" />
+            </svg>
+            <div class="ring-inner">
+              <span id="speedRingText" class="ring-speed">80</span>
+              <span class="ring-unit">km/h</span>
+            </div>
+          </div>
+          <div class="limit-badge" title="道路限速（演示）">
+            <span id="hudSpeedLimit">80</span>
+          </div>
+          <canvas id="minimapCanvas" class="minimap-canvas" width="176" height="176"></canvas>
+        </div>
+
+        <span id="speedReadout" class="hidden" aria-hidden="true">80</span>
+      </div>
+    </section>
+  </main>
+
+  <div id="panelNav" class="overlay overlay-nav hidden" role="dialog" aria-labelledby="navPlanCardTitle">
+    <div class="nav-map-stage" aria-hidden="true">
+      <div id="navMapLeaflet" class="nav-map-leaflet"></div>
+      <div class="nav-map-chrome">
+        <div class="nav-map-compass" title="示意北向">
+          <span>N</span>
+        </div>
+        <div class="nav-map-fabs" aria-label="地图控件">
+          <button type="button" class="nav-map-fab" id="btnNavFabVol" title="导航音量（演示）">🔊</button>
+          <button type="button" class="nav-map-fab" id="btnNavFabNorth" title="路线复位">🧭</button>
+          <button type="button" class="nav-map-fab" id="btnNavFabSet" title="导航设置（演示）">⚙️</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="nav-ui-stack">
+      <article class="nav-card nav-card--search glass">
+        <label class="nav-search-label" for="navSearchInput">搜索目的地 · 沿路搜</label>
+        <div class="nav-search-inner">
+          <span class="nav-search-dot" aria-hidden="true"></span>
+          <input
+            id="navSearchInput"
+            type="search"
+            autocomplete="off"
+            placeholder="输入或通过语音设置目的地…"
+          />
+        </div>
+        <button type="button" class="nav-row-prefer" id="btnNavPrefer">
+          <span>路线偏好</span>
+          <span class="nav-chev">⚙︎</span>
+        </button>
+        <p class="nav-voice-mini">
+          语音识别规划目的地；信息里的接人点可走大模型上下文（左侧「读信息」）。说「关闭导航」「开始导航」可收起面板。
+        </p>
+      </article>
+
+      <article class="nav-card nav-card--route glass">
+        <header class="nav-card-route-head">
+          <h3 id="navPlanCardTitle">导航规划</h3>
+          <span id="navOvEcho" class="nav-poi-chip" title="最近一次 POI">—</span>
+        </header>
+        <div id="navOvBanner" class="nav-route-banner nav-route-banner--ok">
+          <span class="nav-banner-ico">◎</span>
+          <p id="navOvBannerTxt">仿真路网就绪 · 与左侧 HUD 共用行程数据</p>
+        </div>
+        <dl class="nav-metrics">
+          <div class="nav-metric">
+            <dt>全程里程</dt>
+            <dd><strong id="navOvTotalKm">100</strong> <span class="nav-unit">km</span></dd>
+          </div>
+          <div class="nav-metric">
+            <dt>剩余路程</dt>
+            <dd><strong id="navOvRemainKm">—</strong> <span class="nav-unit">km</span></dd>
+          </div>
+          <div class="nav-metric nav-metric--wide">
+            <dt>预计到达时间（演示）</dt>
+            <dd>
+              <span class="nav-eta-major"><strong id="navOvRemainMin">—</strong></span>
+              <span class="nav-eta-muted">/</span>
+              <span class="nav-eta-minor"><strong id="navOvTotalMin">—</strong> </span><span class="nav-unit nav-eta-muted">分钟</span>
+            </dd>
+          </div>
+        </dl>
+        <div class="nav-goal-line">
+          目的地 <strong id="navOvDest">公司</strong>
+        </div>
+        <h4 class="nav-wp-heading">途经点</h4>
+        <ul id="navOvWaypoints" class="nav-waypoint-list"></ul>
+
+        <div id="navPoiPickSheet" class="nav-poi-pick hidden" aria-live="polite">
+          <div class="nav-poi-pick-head">
+            <span id="navPoiPickTitle" class="nav-poi-pick-title">沿路搜索结果</span>
+            <button type="button" id="btnNavPoiPickCancel" class="nav-poi-pick-cancel">
+              取消
+            </button>
+          </div>
+          <ol id="navPoiPickList" class="nav-poi-pick-list"></ol>
+          <p id="navPoiPickHint" class="nav-poi-pick-hint">
+            请说「第一个 / 第二个 / 第三个」；约 14 秒内无应答将默认第一项；也可点击列表选取。
+          </p>
+        </div>
+      </article>
+
+      <div class="nav-quick-row">
+        <button type="button" class="nav-quick" data-nav-quick="家">家</button>
+        <button type="button" class="nav-quick" data-nav-quick="公司">公司</button>
+        <button type="button" class="nav-quick" data-nav-quick="购物中心">商场</button>
+        <button type="button" class="nav-quick" data-nav-quick="充电站">充电</button>
+      </div>
+
+      <div class="nav-footer-actions">
+        <button type="button" id="btnNavStartDemo" class="nav-btn-prime">开始导航（演示）</button>
+        <button type="button" id="btnNavClose" class="nav-btn-ghost">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="panelAc" class="overlay hidden overlay-ac" role="dialog" aria-labelledby="acTitle">
+    <div id="acShell" class="overlay-inner ac-shell glass">
+      <header class="ac-head">
+        <div class="ac-tabs" role="tablist">
+          <button type="button" class="ac-tab is-active" role="tab" aria-selected="true">空调</button>
+          <button type="button" class="ac-tab ac-tab--disabled" disabled role="tab" aria-selected="false">
+            座椅与方向盘
+          </button>
+        </div>
+        <button type="button" id="btnAcClose" class="ac-close cockpit-nointeract" aria-label="关闭">×</button>
+      </header>
+
+      <p id="acTitle" class="ac-banner">
+        当前为演示界面 · 风向与分区与语音意图同步
+      </p>
+
+      <div class="ac-viz" aria-hidden="true">
+        <div class="ac-viz-glow ac-viz-glow--l"></div>
+        <div class="ac-viz-glow ac-viz-glow--r"></div>
+        <div class="ac-viz-cabin">
+          <span class="ac-viz-v ac-viz-v--dl"></span>
+          <span class="ac-viz-v ac-viz-v--dr"></span>
+          <span class="ac-viz-v ac-viz-v--c"></span>
+          <span class="ac-viz-screen"></span>
+        </div>
+        <div class="ac-pm">
+          <span class="ac-pm-item">外 <strong id="acPmOut">62</strong></span>
+          <span class="ac-pm-item">内 <strong id="acPmIn">38</strong></span>
+          <span class="ac-recirc" title="内循环示意">🔁</span>
+        </div>
+      </div>
+
+      <div class="ac-control-grid">
+        <div class="ac-temp-zone">
+          <span class="ac-temp-role">驾驶座</span>
+          <div class="ac-temp-row">
+            <button type="button" class="ac-step" data-ac-temp="drv" data-ac-delta="-1" aria-label="驾驶座降温">‹</button>
+            <div class="ac-temp-num"><span id="acTempDrv">23</span><span class="ac-deg">°</span></div>
+            <button type="button" class="ac-step" data-ac-temp="drv" data-ac-delta="1" aria-label="驾驶座升温">›</button>
+          </div>
+        </div>
+
+        <div class="ac-fan-zone">
+          <div class="ac-fan-top">
+            <span class="ac-fan-icon" aria-hidden="true">🌀</span>
+            <span id="acFanNum" class="ac-fan-digits">2</span>
+            <button type="button" class="ac-mini" data-ac-fan-delta="-1" aria-label="风量减">−</button>
+            <button type="button" class="ac-mini" data-ac-fan-delta="1" aria-label="风量加">＋</button>
+          </div>
+          <div class="ac-fan-led-row" aria-label="风量档位">
+            <button type="button" class="ac-fan-led" data-ac-fan-set="1"><i></i><i></i></button>
+            <button type="button" class="ac-fan-led" data-ac-fan-set="2"><i></i><i></i></button>
+            <button type="button" class="ac-fan-led" data-ac-fan-set="3"><i></i><i></i></button>
+            <button type="button" class="ac-fan-led" data-ac-fan-set="4"><i></i><i></i></button>
+            <button type="button" class="ac-fan-led" data-ac-fan-set="5"><i></i><i></i></button>
+          </div>
+        </div>
+
+        <div id="acZonePass" class="ac-temp-zone ac-zone-pass">
+          <span class="ac-temp-role">副驾</span>
+          <div class="ac-temp-row">
+            <button type="button" class="ac-step" data-ac-temp="pas" data-ac-delta="-1" aria-label="副驾降温">‹</button>
+            <div class="ac-temp-num"><span id="acTempPas">23</span><span class="ac-deg">°</span></div>
+            <button type="button" class="ac-step" data-ac-temp="pas" data-ac-delta="1" aria-label="副驾升温">›</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ac-mode-row">
+        <button type="button" id="acBtnSync" class="ac-chip">同步</button>
+        <button type="button" id="acBtnCompressor" class="ac-chip">A/C</button>
+        <button type="button" id="acBtnAuto" class="ac-chip">AUTO</button>
+        <span class="ac-mode-spacer"></span>
+        <button type="button" id="acBtnPower" class="ac-power" aria-label="空调开关"><span></span></button>
+      </div>
+
+      <div class="ac-wind-block">
+        <span class="ac-wind-title">出风口</span>
+        <span id="acWindReadout" class="ac-wind-readout"></span>
+        <div class="ac-wind-pills">
+          <button type="button" class="ac-wpill" data-ac-wind="均匀">均匀</button>
+          <button type="button" class="ac-wpill" data-ac-wind="吹脸">吹脸</button>
+          <button type="button" class="ac-wpill" data-ac-wind="吹脚">吹脚</button>
+          <button type="button" class="ac-wpill" data-ac-wind="挡风玻璃">前挡除雾</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="panelCoffee" class="overlay overlay-coffee hidden" role="dialog" aria-modal="true">
+    <div class="coffee-modal cockpit-nointeract">
+      <header class="coffee-head">
+        <button type="button" id="btnCoffeeClose" class="coffee-close" aria-label="关闭">×</button>
+        <div class="coffee-tabs">
+          <button type="button" class="coffee-tab is-active" data-coffee-tab="0">经典菜单</button>
+          <button type="button" class="coffee-tab" data-coffee-tab="1">茶咖推荐</button>
+        </div>
+      </header>
+      <div class="coffee-body">
+        <aside id="coffeeCatNav" class="coffee-cat-nav"></aside>
+        <main class="coffee-main">
+          <div id="coffeeOrderedBlock" class="coffee-ordered-panel" aria-live="polite"></div>
+          <div id="coffeeShopSuggest" class="coffee-shop-suggest" aria-live="polite"></div>
+          <div class="coffee-banner">
+            <div class="coffee-banner-inner">
+              <span class="coffee-banner-tag">车内点单 · 虚拟演示</span>
+              <h3>今日推荐 · 橙C美式</h3>
+              <p>清爽果香与金奖豆香气的平衡</p>
+            </div>
+          </div>
+          <div id="coffeeFilterPills" class="coffee-filters"></div>
+          <div id="coffeeProductList" class="coffee-product-list"></div>
+        </main>
+      </div>
+      <div id="coffeeQrSlot" class="coffee-qr-banner hidden">
+        <div class="coffee-qr-inner">
+          <div class="coffee-qr-grid" aria-hidden="true"></div>
+          <p>请使用手机扫码完成虚拟支付</p>
+          <span class="coffee-qr-sub">约 5 秒后自动完成</span>
+        </div>
+      </div>
+      <footer class="coffee-foot">
+        <div class="coffee-foot-promo">配送费已减免 · 车内虚拟订单</div>
+        <div id="coffeeCartSummaryFoot" class="coffee-cart-summary-foot" aria-live="polite"></div>
+        <div class="coffee-cart-row">
+          <div class="coffee-cart-left">
+            <div class="coffee-bag">🛍<span id="coffeeCartBadge" class="coffee-badge">0</span></div>
+            <div class="coffee-cart-txt">
+              <span class="coffee-est-label">预计到手</span>
+              <span id="coffeeCartTotal" class="coffee-est-price">¥0</span>
+            </div>
+          </div>
+          <button type="button" id="btnCoffeeCheckout" class="coffee-checkout">去结算</button>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <div id="panelScenic" class="overlay hidden" role="dialog">
+    <div class="overlay-inner scenic-inner glass">
+      <h2>风景打卡</h2>
+      <p class="scenic-voice-hint">
+        全程语音控制 · 说<strong>「开始拍照」</strong>、<strong>「拍照」</strong>即倒计时抓拍；也可对着<strong>车内摄像头</strong>比 ✌（剪刀手）触发抓拍。
+        说<strong>「关闭打卡」</strong>退出。车外为汽车自驾/公路与城市风景类虚拟取景，打开本页即预载。
+      </p>
+      <div class="scenic-grid">
+        <div class="cam-box">
+          <video id="camPreview" autoplay muted playsinline class="cam"></video>
+          <p id="camHint" class="cam-hint">车内摄像头</p>
+        </div>
+        <div class="cam-box exterior">
+          <img
+            id="scenicExteriorPreview"
+            class="scenic-exterior-img"
+            alt="车外虚拟取景"
+          />
+          <p class="cam-hint">车外虚拟取景（自驾/风景）· 打开本页即加载</p>
+        </div>
+      </div>
+      <div id="scenicCountdown" class="scenic-countdown hidden"></div>
+      <canvas id="composeCanvas" class="compose-canvas hidden"></canvas>
+      <img id="composePreview" class="compose-preview hidden" alt="合成预览" />
+    </div>
+  </div>
+
+  <div id="panelVideo" class="overlay overlay-video hidden" role="dialog" aria-modal="true" aria-labelledby="videoPanelTitle">
+    <div class="video-modal glass">
+      <header class="video-modal__head">
+        <span id="videoPanelTitle" class="video-modal__title">视频播放</span>
+        <span class="video-modal__badge">视频播放页面</span>
+        <button type="button" id="btnVideoClose" class="video-modal__close" aria-label="关闭视频">×</button>
+      </header>
+      <div class="video-modal__body">
+        <div class="video-modal__main">
+          <div class="video-modal__stage">
+            <video id="cockpitVideo" class="video-modal__el" playsinline></video>
+            <div id="videoPlayOverlay" class="video-modal__big-play" aria-hidden="true"></div>
+          </div>
+          <footer class="video-modal__bar">
+            <div class="video-modal__info">
+              <span id="videoTitleLine" class="video-modal__name">—</span>
+              <span id="videoMetaLine" class="video-modal__meta">车载演示 · 外链片源</span>
+            </div>
+            <div class="video-modal__seek">
+              <div class="video-modal__track">
+                <div id="videoProgress" class="video-modal__fill"></div>
+              </div>
+              <span id="videoTime" class="video-modal__time">00:00 / 00:00</span>
+            </div>
+            <div class="video-modal__controls">
+              <button type="button" id="btnVideoPrev" class="video-btn">上一个</button>
+              <button type="button" id="btnVideoPlay" class="video-btn video-btn--primary">播放</button>
+              <button type="button" id="btnVideoNext" class="video-btn">下一个</button>
+              <div class="video-modal__vol">
+                <span class="video-modal__vol-ico" aria-hidden="true">🔊</span>
+                <button type="button" id="btnVideoVolDown" class="video-btn video-btn--icon" aria-label="音量减小">−</button>
+                <button type="button" id="btnVideoVolUp" class="video-btn video-btn--icon" aria-label="音量增大">+</button>
+              </div>
+            </div>
+          </footer>
+        </div>
+        <aside class="video-modal__list-wrap" aria-label="可播放列表">
+          <div class="video-modal__list-title">片库</div>
+          <ul id="videoCatalogList" class="video-modal__list"></ul>
+        </aside>
+      </div>
+    </div>
+  </div>
+
+  <div id="panelFatigue" class="fatigue-overlay hidden" role="alertdialog" aria-modal="true" aria-labelledby="fatigueTitle">
+    <div class="fatigue-overlay__inner">
+      <p id="fatigueTitle" class="fatigue-overlay__title-bar">疲劳驾驶提醒</p>
+      <div class="fatigue-overlay__panel">
+        <button type="button" class="fatigue-overlay__close" id="btnFatigueClose" aria-label="关闭提醒">×</button>
+        <div class="fatigue-overlay__illu" aria-hidden="true">
+          <span class="fatigue-overlay__hand">✋</span>
+          <span class="fatigue-overlay__shake">〰</span>
+          <span class="fatigue-overlay__tri">⚠️</span>
+        </div>
+        <div class="fatigue-overlay__warn">WARNING!</div>
+        <p class="fatigue-overlay__hint">请保持专注，累了请靠边休息</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="vuiContainer" class="vui-container glass">
+    <div class="vui-mic-core" id="vuiMicCore">
+      <div class="mic-icon-large">🎤</div>
+    </div>
+    <div class="vui-status-text" id="vuiStatusText">语音未启动</div>
+    <div class="vui-command-text" id="vuiCommandText"></div>
+    <div class="vui-hint">唤醒拾音后<strong>全程语音</strong>：ASR → /intent → 执行。可说「读信息」「看电影」「打开驾驶员监测」或「关闭DMS」「暂停」「退出视频播放」「导航到…」「顺便去加油站」。</div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="js/nav-osm.js"></script>
+  <script src="js/cockpit-video-catalog.js"></script>
+  <script src="js/tts-one-mouth.js"></script>
+  <script src="js/cockpit-app.js"></script>
+  <script type="module" src="js/road-three.js?v=gltfcar1"></script>
+  <script src="js/voice-cockpit.js"></script>
+  <script src="js/scenic-gesture-v.js"></script>
+  <script src="js/fatigue-dms.js"></script>
+</body>
+</html>

@@ -1,0 +1,40 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "🚀 Run Demo",
+      "type": "shell",
+      "command": "([ -f .venv/bin/activate ] && . .venv/bin/activate); ([ -f ../vui/.venv/bin/activate ] && . ../vui/.venv/bin/activate); exec python server.py",
+      "windows": {
+        "command": "if (Test-Path .venv\\Scripts\\Activate.ps1) { . .venv\\Scripts\\Activate.ps1 } elseif (Test-Path ..\\vui\\.venv\\Scripts\\Activate.ps1) { . ..\\vui\\.venv\\Scripts\\Activate.ps1 } elseif (Test-Path venv\\Scripts\\Activate.ps1) { . venv\\Scripts\\Activate.ps1 }; python server.py"
+      },
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "cockpit",
+        "clear": true
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "🛑 Stop Demo",
+      "type": "shell",
+      "command": "PID=$(lsof -ti :5002 2>/dev/null); if [ -n \"$PID\" ]; then kill -9 $PID; fi; echo 'Cockpit (port 5002) stopped.'",
+      "windows": {
+        "command": "$p = Get-NetTCPConnection -LocalPort 5002 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique; if ($p) { $p | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }; Write-Host 'Cockpit (port 5002) stopped.' } else { Write-Host 'No listener on port 5002.' }"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      }
+    }
+  ]
+}
