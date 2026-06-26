@@ -6,7 +6,7 @@
 
 ## 1. 工程结构与 VOX 的关系
 
-本工程默认与兄弟目录 `../vox` 协作运行：
+本工程默认与目录 `../claudeCode/vox` 协作运行：
 
 - `VirtualSmartCockpit`（本仓库）
   - 负责座舱 UI（导航/音乐/消息/打卡/行车场景）
@@ -36,7 +36,7 @@
 - Python `3.12`（VOX 任务脚本按 3.12 管理虚拟环境）
 - 建议目录结构：
   - `E:\21_Coding\VirtualSmartCockpit`
-  - `E:\21_Coding\vox`
+  - `E:\21_Coding\claudeCode\vox`
 
 ---
 
@@ -97,7 +97,7 @@ if (Test-Path .venv\Scripts\Activate.ps1) { . .venv\Scripts\Activate.ps1 } elsei
 ### 4.2 启动 VOX 后端（等价 `🚀 Run VOX Backend`）
 
 ```powershell
-$voxRoot = (Resolve-Path ..\vox).Path; $venvRoot = Join-Path $voxRoot '.venv-win'; $py = Join-Path $venvRoot 'Scripts\python.exe'; if (Test-Path $py) { $maj = (& $py -c 'import sys; print(sys.version_info[0])'); $min = (& $py -c 'import sys; print(sys.version_info[1])'); if (("$maj.$min") -ne '3.12') { Remove-Item -Recurse -Force $venvRoot -ErrorAction SilentlyContinue } }; if (!(Test-Path $py)) { py -3.12 -m venv $venvRoot }; $py = Join-Path $venvRoot 'Scripts\python.exe'; $needInstall = $true; if (Test-Path $py) { & $py -c 'import httpx, claude_agent_sdk' 2>$null; if ($LASTEXITCODE -eq 0) { $needInstall = $false } }; if ($needInstall) { & $py -m pip install -U pip; & $py -m pip install -r (Join-Path $voxRoot 'requirements.txt'); & $py -m pip install claude-agent-sdk }; Set-Location $voxRoot; & $py server.py
+$voxRoot = (Resolve-Path ..\claudeCode\vox).Path; $venvRoot = Join-Path $voxRoot '.venv-win'; $py = Join-Path $venvRoot 'Scripts\python.exe'; if (Test-Path $py) { $maj = (& $py -c 'import sys; print(sys.version_info[0])'); $min = (& $py -c 'import sys; print(sys.version_info[1])'); if (("$maj.$min") -ne '3.12') { Remove-Item -Recurse -Force $venvRoot -ErrorAction SilentlyContinue } }; if (!(Test-Path $py)) { py -3.12 -m venv $venvRoot }; $py = Join-Path $venvRoot 'Scripts\python.exe'; $needInstall = $true; if (Test-Path $py) { & $py -c 'import httpx, claude_agent_sdk' 2>$null; if ($LASTEXITCODE -eq 0) { $needInstall = $false } }; if ($needInstall) { & $py -m pip install -U pip; & $py -m pip install -r (Join-Path $voxRoot 'requirements.txt'); & $py -m pip install claude-agent-sdk }; Set-Location $voxRoot; & $py server.py
 ```
 
 ### 4.3 同时启动 Cockpit + VOX（等价 `🚀 Run Cockpit + VOX`）
@@ -128,13 +128,13 @@ $ports = @(5002,5001); foreach ($port in $ports) { $p = Get-NetTCPConnection -Lo
 ## 6. 常见问题
 
 - VOX 面板显示未连接：
-  - 确认 `../vox` 已启动并监听 `5001`
+  - 确认 `../claudeCode/vox` 已启动并监听 `5001`
   - 在座舱 VOX 面板中检查后端地址是否为 `http://127.0.0.1:5001`
 - 座舱打不开：
   - 确认 `5002` 端口未被占用
   - 重新执行第 4 节停止命令后再启动
 - 同事机器目录不同：
-  - 只要保证本仓库与 `vox` 是同级目录（`..\vox` 可解析）即可
+  - 只要保证本仓库相对于 VOX 的路径为 `..\claudeCode\vox` 可解析即可
 - 脚本被系统策略拦截：
   - 使用 `powershell -ExecutionPolicy Bypass -File <script.ps1>` 方式运行即可
 

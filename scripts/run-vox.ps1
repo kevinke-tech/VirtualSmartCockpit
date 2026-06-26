@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$voxRoot = Resolve-Path (Join-Path $repoRoot "..\vox")
+$voxRoot = Resolve-Path (Join-Path $repoRoot "..\claudeCode\vox")
 $venvRoot = Join-Path $voxRoot ".venv-win"
 $py = Join-Path $venvRoot "Scripts\python.exe"
 
