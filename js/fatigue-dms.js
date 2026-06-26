@@ -534,5 +534,5 @@
     }
   };
 
-  window.__cockpitDmsEnabled = true;
+  window.__cockpitDmsEnabled = false;
 })();

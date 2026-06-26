@@ -18,6 +18,8 @@
     typeof window.__COCKPIT_API_BASE !== "undefined" && window.__COCKPIT_API_BASE !== null
       ? String(window.__COCKPIT_API_BASE)
       : "";
+  var VOX_BACKEND_STORAGE_KEY = "cockpit_vox_backend";
+  var VOX_BACKEND_DEFAULT = "http://127.0.0.1:5001";
   var TARGET_SAMPLE_RATE = 16000;
 
   // ── VAD tuning ────────────────────────────────────────────────────
@@ -25,10 +27,13 @@
   var NOISE_FLOOR_ALPHA = 0.03;       // EMA smoothing for noise tracking
   var SPEECH_THRESHOLD_RATIO = 3.0;   // speech must be N× above noise floor
   var SPEECH_THRESHOLD_MIN = 0.012;   // absolute minimum threshold
+  var SPEECH_START_THRESHOLD_RATIO = 3.6; // stricter threshold to enter speaking state
   var SILENCE_DURATION_MS = 500;      // silence after last speech frame to trigger end
   var MIN_SPEECH_DURATION_MS = 250;   // ignore very short bursts
   var MAX_SPEECH_DURATION_MS = 15000;
   var PRE_BUFFER_FRAMES = 4;          // keep N frames before speech onset (~370ms at 4096/48kHz)
+  var START_CONSEC_FRAMES = 2;        // require continuous voiced frames before start
+  var MIN_VOICED_FRAMES = 4;          // require enough voiced frames before sending ASR
   var BARGE_IN_RATIO = 5.0;           // during TTS, user must be N× above noise to interrupt
 
   // ── state ───────────────────────────────────────────────────────────
@@ -40,6 +45,9 @@
   var speechStart = 0;
   var lastSpeechTime = 0;
   var speechBuffer = [];
+  var speechVoicedFrames = 0;
+  var speechConsecFrames = 0;
+  var speechStartThreshold = SPEECH_THRESHOLD_MIN;
   var processing = false;
 
   // Adaptive noise floor
@@ -118,6 +126,69 @@
     return window.Cockpit && typeof window.Cockpit.getVoiceContext === "function"
       ? window.Cockpit.getVoiceContext()
       : {};
+  }
+
+  function normalizeBackend(raw, fallback) {
+    var v = String(raw || fallback || "").trim();
+    return v.replace(/\/+$/, "");
+  }
+
+  function getVoxBackend() {
+    var stored = "";
+    try {
+      stored = localStorage.getItem(VOX_BACKEND_STORAGE_KEY) || "";
+    } catch (_e) {}
+    return normalizeBackend(stored, VOX_BACKEND_DEFAULT);
+  }
+
+  function actionCanReuseCockpitUi(action) {
+    if (!action) return false;
+    if (action === "none" || action === "unknown" || action === "chat") return false;
+    return true;
+  }
+
+  async function callVoxPlanFallback(transcript) {
+    var vox = getVoxBackend();
+    var resp = await fetch(vox + "/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        transcript: transcript,
+        image_b64: null,
+        context: {
+          source: "virtual-smart-cockpit-voice",
+          cockpit: getPageContext(),
+        },
+      }),
+    });
+    if (!resp.ok) throw new Error("VOX /plan " + resp.status);
+    return resp.json();
+  }
+
+  async function tryVoxFallbackForIntent(text, intentData) {
+    var action = intentData && intentData.action ? String(intentData.action).trim() : "";
+    if (action === "none") return false;
+    if (actionCanReuseCockpitUi(action)) return false;
+    if (!text) return false;
+    try {
+      var plan = await callVoxPlanFallback(text);
+      var speak = (plan && plan.speak ? String(plan.speak) : "").trim();
+      var render = (plan && plan.render ? String(plan.render) : "").trim();
+      var kind = (plan && plan.kind ? String(plan.kind) : "unknown").trim();
+      console.log("[Voice] VOX fallback:", kind, render || speak || "(empty)");
+      if (speak) {
+        if (window.CockpitTTS && window.CockpitTTS.speak)
+          window.CockpitTTS.speak(speak, { interrupt: true });
+        else if (typeof window.speakTTS === "function")
+          window.speakTTS(speak, { interrupt: true });
+      }
+      updateVUI("success", speak || render || ("VOX: " + kind));
+      setTimeout(function () { updateVUI("ready"); }, 3500);
+      return true;
+    } catch (e) {
+      console.warn("[Voice] VOX fallback failed:", e.message);
+      return false;
+    }
   }
 
   // ── WAV encoding ────────────────────────────────────────────────────
@@ -359,6 +430,11 @@
       var intentMs = Date.now() - intentStart;
       var tier = intentData.match === "fast" ? "FAST" : "LLM";
       console.log("[Voice] Intent (" + tier + ", " + intentMs + "ms):", intentData.action, intentData.response);
+      var handledByVox = await tryVoxFallbackForIntent(text, intentData);
+      if (handledByVox) {
+        processing = false;
+        return;
+      }
       executeAction({ text: text, ...intentData });
     } catch (e) {
       console.error("[Voice] Pipeline error:", e);
@@ -371,6 +447,10 @@
   // ── adaptive VAD + audio capture ────────────────────────────────────
   function getSpeechThreshold() {
     return Math.max(SPEECH_THRESHOLD_MIN, noiseFloor * SPEECH_THRESHOLD_RATIO);
+  }
+
+  function getSpeechStartThreshold() {
+    return Math.max(SPEECH_THRESHOLD_MIN, noiseFloor * SPEECH_START_THRESHOLD_RATIO);
   }
 
   async function startAudioCapture() {
@@ -395,6 +475,9 @@
     noiseFloor = NOISE_FLOOR_INIT;
     noiseFrameCount = 0;
     preBuffer = [];
+    speechVoicedFrames = 0;
+    speechConsecFrames = 0;
+    speechStartThreshold = SPEECH_THRESHOLD_MIN;
 
     scriptNode.onaudioprocess = function (e) {
       if (!isActive) return;
@@ -406,6 +489,7 @@
 
       var now = Date.now();
       var threshold = getSpeechThreshold();
+      var startThreshold = getSpeechStartThreshold();
       var isSpeechFrame = rms > threshold;
 
       // ── TTS echo suppression (hard block, only barge-in breaks through) ──
@@ -442,45 +526,75 @@
         // Maintain pre-speech ring buffer
         preBuffer.push(new Float32Array(input));
         if (preBuffer.length > PRE_BUFFER_FRAMES) preBuffer.shift();
+        speechConsecFrames = 0;
         return;
       }
 
       if (isSpeechFrame) {
         noiseFrameCount = 0;
+        speechConsecFrames++;
 
         if (!isSpeaking) {
+          // Enter speech mode only if voice is clearly above ambient noise
+          // for continuous frames. This suppresses keyboard/AC short bursts.
+          if (!(rms > startThreshold && speechConsecFrames >= START_CONSEC_FRAMES)) {
+            preBuffer.push(new Float32Array(input));
+            if (preBuffer.length > PRE_BUFFER_FRAMES) preBuffer.shift();
+            return;
+          }
           isSpeaking = true;
           speechStart = now;
+          speechVoicedFrames = 0;
+          speechStartThreshold = startThreshold;
           // Prepend pre-buffer so we don't clip the start of speech
           speechBuffer = preBuffer.slice();
           preBuffer = [];
           updateVUI("listening");
         }
         lastSpeechTime = now;
+        speechVoicedFrames++;
         speechBuffer.push(new Float32Array(input));
       } else if (isSpeaking) {
+        speechConsecFrames = 0;
         speechBuffer.push(new Float32Array(input));
         var speechDuration = now - speechStart;
 
         if (now - lastSpeechTime > SILENCE_DURATION_MS && speechDuration > MIN_SPEECH_DURATION_MS) {
           isSpeaking = false;
           var merged = mergeBuffers(speechBuffer);
+          var voicedFrames = speechVoicedFrames;
+          var isValidSpeech = voicedFrames >= MIN_VOICED_FRAMES;
           speechBuffer = [];
           preBuffer = [];
-          processAudio(merged, nativeSR);
+          speechVoicedFrames = 0;
+          if (isValidSpeech) {
+            processAudio(merged, nativeSR);
+          } else {
+            console.log("[Voice] Drop noisy burst (voicedFrames=" + voicedFrames + ")");
+            updateVUI("ready");
+          }
         } else if (speechDuration > MAX_SPEECH_DURATION_MS) {
           isSpeaking = false;
           var merged2 = mergeBuffers(speechBuffer);
+          var isValidSpeech2 = speechVoicedFrames >= MIN_VOICED_FRAMES;
           speechBuffer = [];
           preBuffer = [];
-          processAudio(merged2, nativeSR);
+          speechVoicedFrames = 0;
+          if (isValidSpeech2) processAudio(merged2, nativeSR);
+          else updateVUI("ready");
         }
       }
     };
 
     source.connect(scriptNode);
     scriptNode.connect(audioCtx.destination);
-    console.log("[Voice] Audio capture started (adaptive VAD, threshold:", getSpeechThreshold().toFixed(4), ")");
+    console.log(
+      "[Voice] Audio capture started (adaptive VAD, start=" +
+        getSpeechStartThreshold().toFixed(4) +
+        ", keep=" +
+        getSpeechThreshold().toFixed(4) +
+        ")"
+    );
   }
 
   function stopAudioCapture() {
@@ -489,6 +603,8 @@
     if (audioCtx) { audioCtx.close(); audioCtx = null; }
     speechBuffer = [];
     preBuffer = [];
+    speechVoicedFrames = 0;
+    speechConsecFrames = 0;
     isSpeaking = false;
     var wasStreamingHtmlTts = !!currentTTSAudio;
     stopPlaybackHardwareOnly();

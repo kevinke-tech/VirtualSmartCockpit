@@ -15,6 +15,7 @@
 
 html {
   height: 100%;
+  font-size: 18px;
 }
 
 body.theme-sr {
@@ -176,16 +177,17 @@ body.theme-sr {
   max-width: none;
   margin: 0;
   display: grid;
-  grid-template-columns: minmax(min(304px, 26vw), 440px) minmax(0, 1fr);
-  gap: 0.65rem clamp(0.6rem, 1.2vw, 1rem);
-  padding: 0.5rem clamp(0.5rem, 1.2vw, 1rem);
+  /* 左边明显加宽，右边行车区收窄到剩余空间。 */
+  grid-template-columns: clamp(460px, 38vw, 700px) minmax(0, 1fr) !important;
+  gap: 0.8rem clamp(0.7rem, 1.4vw, 1.1rem);
+  padding: 0.65rem clamp(0.6rem, 1.4vw, 1.1rem);
   align-items: stretch;
 }
 
 .left-stack {
   display: flex;
   flex-direction: column;
-  gap: 0.65rem;
+  gap: 0.85rem;
   min-height: 0;
 }
 
@@ -216,7 +218,7 @@ body.theme-sr {
 
 .card {
   border-radius: 22px;
-  padding: clamp(1rem, 2.2vh, 1.4rem) clamp(1rem, 2vw, 1.35rem);
+  padding: clamp(1.15rem, 2.45vh, 1.65rem) clamp(1.15rem, 2.2vw, 1.6rem);
 }
 
 .nav-card.sr-nav,
@@ -247,7 +249,7 @@ body.theme-sr {
 
 .sr-dist-num {
   display: block;
-  font-size: clamp(2rem, 4.2vw, 2.85rem);
+  font-size: clamp(1.5rem, 2.8vw, 2.1rem);
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
@@ -616,8 +618,8 @@ body.theme-sr {
 
 .overlay-inner {
   border-radius: 22px;
-  padding: clamp(1.25rem, 3vh, 2rem);
-  max-width: min(1100px, 96vw);
+  padding: clamp(1.45rem, 3.3vh, 2.25rem);
+  max-width: min(1280px, 97vw);
   width: 100%;
   max-height: min(94vh, 1200px);
   overflow: auto;
@@ -652,6 +654,15 @@ body.theme-sr {
   z-index: 1 !important;
   height: 100%;
   width: 100%;
+  background:
+    linear-gradient(180deg, rgba(241, 245, 249, 0.95) 0%, rgba(226, 232, 240, 0.95) 100%),
+    repeating-linear-gradient(
+      45deg,
+      rgba(203, 213, 225, 0.35) 0,
+      rgba(203, 213, 225, 0.35) 1px,
+      transparent 1px,
+      transparent 28px
+    );
 }
 
 .leaflet-container {
@@ -715,6 +726,24 @@ body.theme-sr {
   background: transparent;
 }
 
+.nav-lf-car-icon {
+  border: none;
+  background: transparent;
+}
+
+.nav-lf-car-disc {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 2px solid #16a34a;
+  background: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.95rem;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.22);
+}
+
 .nav-lf-charger-disc {
   width: 36px;
   height: 36px;
@@ -746,13 +775,95 @@ body.theme-sr {
 .nav-ui-stack {
   position: relative;
   z-index: 640;
-  width: min(560px, 92vw);
+  width: min(660px, 95vw);
   max-width: 96vw;
   margin: clamp(48px, 8vh, 100px) 1rem clamp(20px, 4vh, 40px) clamp(12px, 2vw, 28px);
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
   pointer-events: auto;
+}
+
+/* —— 可读性增强：非行驶主视图整体放大 —— */
+#vuiContainer,
+#voxCard,
+.overlay,
+.overlay .glass,
+.overlay .video-modal,
+.overlay .coffee-modal,
+.overlay .ac-shell,
+.overlay .scenic-inner,
+.overlay .nav-card {
+  font-size: 1.08rem;
+}
+
+#voxCard.vox-card {
+  max-height: min(460px, 52vh);
+}
+
+.video-modal {
+  width: min(1320px, 99vw);
+  min-height: min(82vh, 760px);
+}
+
+.coffee-modal {
+  max-width: min(1280px, 98vw);
+}
+
+.overlay-inner.scenic-inner {
+  max-width: min(1320px, 99vw);
+}
+
+/* 用户要求：左栏可读性进一步提升 */
+:root {
+  --panel-zoom-3x: 1.3;
+  --left-panel-zoom: 1.48;
+}
+
+#leftStack,
+#vuiContainer {
+  zoom: var(--left-panel-zoom);
+}
+
+.overlay .overlay-inner,
+.overlay .video-modal,
+.overlay .coffee-modal,
+.overlay .ac-shell,
+.overlay .scenic-inner,
+.overlay .scenic-gallery-inner,
+.overlay .nav-ui-stack {
+  zoom: var(--panel-zoom-3x);
+}
+
+/* fallback for browsers that do not support zoom */
+@supports not (zoom: 1) {
+  #leftStack,
+  #vuiContainer {
+    transform: scale(var(--left-panel-zoom));
+    transform-origin: top left;
+  }
+
+  .overlay .overlay-inner,
+  .overlay .video-modal,
+  .overlay .coffee-modal,
+  .overlay .ac-shell,
+  .overlay .scenic-inner,
+  .overlay .scenic-gallery-inner,
+  .overlay .nav-ui-stack {
+    transform: scale(var(--panel-zoom-3x));
+    transform-origin: top left;
+  }
+}
+
+/* 左栏内容必须填满整列，避免中间出现“空蓝条” */
+.left-stack,
+.left-stack > .glass,
+.left-stack > .card,
+#messageCard.message-card,
+#musicPanel.music-panel,
+#voxCard.vox-card {
+  width: 100%;
+  max-width: none;
 }
 
 .nav-card.glass {
@@ -1728,6 +1839,164 @@ body.theme-sr {
   display: none;
 }
 
+/* —— 打卡照片库 —— */
+.overlay.scenic-gallery-overlay {
+  z-index: 43;
+}
+
+.overlay-inner.scenic-gallery-inner {
+  max-width: min(1220px, 98vw);
+}
+
+.scenic-gallery-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.scenic-gallery-head h2 {
+  margin: 0;
+}
+
+.scenic-gallery-badge {
+  margin-left: auto;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #0c4a6e;
+  background: rgba(191, 219, 254, 0.92);
+  border: 1px solid rgba(96, 165, 250, 0.55);
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+}
+
+.scenic-gallery-close {
+  border: none;
+  border-radius: 11px;
+  width: 34px;
+  height: 34px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #e2e8f0;
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.scenic-gallery-hint {
+  margin: 0.35rem 0 0.7rem;
+  color: #475569;
+  font-size: 0.78rem;
+}
+
+.scenic-gallery-body {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 0.75rem;
+  min-height: min(62vh, 680px);
+}
+
+.scenic-gallery-list-wrap {
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.48);
+  background: rgba(241, 245, 249, 0.7);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.scenic-photo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.42rem;
+  max-height: min(62vh, 680px);
+  overflow: auto;
+}
+
+.scenic-photo-item {
+  width: 100%;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #0f172a;
+  font-size: 0.75rem;
+  text-align: left;
+  cursor: pointer;
+  padding: 0.42rem 0.45rem;
+}
+
+.scenic-photo-item.is-current {
+  border-color: rgba(14, 116, 144, 0.72);
+  background: rgba(186, 230, 253, 0.65);
+}
+
+.scenic-photo-item-time {
+  display: block;
+  font-size: 0.67rem;
+  color: #64748b;
+  margin-top: 0.15rem;
+}
+
+.scenic-gallery-preview-wrap {
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.5);
+  background: rgba(15, 23, 42, 0.82);
+  padding: 0.62rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 0;
+}
+
+.scenic-gallery-empty {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  border-radius: 10px;
+  border: 1px dashed rgba(148, 163, 184, 0.55);
+  color: #cbd5e1;
+  font-size: 0.8rem;
+  padding: 1.4rem;
+}
+
+.scenic-gallery-stage {
+  margin: 0;
+  flex: 1;
+  min-height: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #020617;
+}
+
+.scenic-gallery-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  display: block;
+}
+
+.scenic-gallery-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.scenic-gallery-meta {
+  color: #cbd5e1;
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.scenic-gallery-actions {
+  margin-left: auto;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
 /* —— 疲劳驾驶全屏提醒 —— */
 .fatigue-overlay {
   position: fixed;
@@ -2622,6 +2891,147 @@ button.cockpit-nointeract {
   filter: brightness(1.05);
 }
 
+/* VOX 智能体面板（行车页侧栏，直连 vox /plan + /health） */
+#voxCard.vox-card {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(340px, 40vh);
+  padding: 0.72rem clamp(0.82rem, 1.55vw, 1.08rem);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.vox-card__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.vox-card__title {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+}
+
+.vox-status-pill {
+  margin-left: auto;
+  font-size: 0.67rem;
+  font-weight: 700;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  color: #64748b;
+  background: rgba(241, 245, 249, 0.9);
+}
+
+.vox-status-pill--ok {
+  color: #065f46;
+  background: rgba(209, 250, 229, 0.92);
+  border-color: rgba(16, 185, 129, 0.45);
+}
+
+.vox-status-pill--busy {
+  color: #92400e;
+  background: rgba(254, 243, 199, 0.95);
+  border-color: rgba(245, 158, 11, 0.5);
+}
+
+.vox-status-pill--error {
+  color: #991b1b;
+  background: rgba(254, 226, 226, 0.95);
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.vox-card__hint {
+  margin: 0;
+  font-size: 0.69rem;
+  color: #475569;
+}
+
+.vox-backend-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.vox-backend-row label {
+  font-size: 0.66rem;
+  color: #64748b;
+}
+
+.vox-backend-row input,
+#voxPromptInput {
+  min-width: 0;
+  border-radius: 9px;
+  border: 1px solid rgba(148, 163, 184, 0.48);
+  background: rgba(255, 255, 255, 0.88);
+  padding: 0.38rem 0.52rem;
+  font-size: 0.72rem;
+}
+
+.vox-backend-row button,
+.vox-form button,
+.vox-quick-btn {
+  border: none;
+  border-radius: 9px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0.36rem 0.52rem;
+  color: #0f172a;
+  background: linear-gradient(180deg, #dbeafe 0%, #93c5fd 100%);
+}
+
+.vox-quick-row {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.vox-log {
+  flex: 1;
+  min-height: 78px;
+  overflow: auto;
+  border-radius: 11px;
+  padding: 0.42rem 0.5rem;
+  border: 1px solid rgba(148, 163, 184, 0.4);
+  background: rgba(15, 23, 42, 0.9);
+  color: #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.32rem;
+}
+
+.vox-log__row {
+  display: flex;
+  gap: 0.33rem;
+  align-items: baseline;
+  font-size: 0.69rem;
+}
+
+.vox-log__row--user .vox-log__role {
+  color: #93c5fd;
+}
+
+.vox-log__row--agent .vox-log__role {
+  color: #86efac;
+}
+
+.vox-log__stamp {
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
+.vox-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.35rem;
+}
+
 /* ── 视频点播叠加（片源与 E:\\21_Coding\\vui 中 CONFIG.videos 对齐） ── */
 .overlay.overlay-video {
   z-index: 42;
@@ -2633,6 +3043,8 @@ button.cockpit-nointeract {
 
 .video-modal {
   width: min(1180px, 98vw);
+  min-height: min(76vh, 680px);
+  height: min(92vh, 900px);
   max-height: min(92vh, 900px);
   display: flex;
   flex-direction: column;
@@ -2696,13 +3108,13 @@ button.cockpit-nointeract {
   grid-template-rows: minmax(0, 1fr);
   align-items: stretch;
   min-width: 0;
-  min-height: 0;
+  min-height: 320px;
   overflow: hidden;
 }
 
 .video-modal__main {
   min-width: 0;
-  min-height: 0;
+  min-height: 280px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -2714,7 +3126,7 @@ button.cockpit-nointeract {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  min-height: 0;
+  min-height: 220px;
   max-height: 100%;
   border-left: 1px solid rgba(96, 165, 250, 0.22);
   background: rgba(15, 23, 42, 0.65);
@@ -2744,6 +3156,15 @@ button.cockpit-nointeract {
 
 .video-modal__list li {
   margin: 0;
+}
+
+.video-modal__list-empty {
+  margin: 0.55rem 0.3rem;
+  padding: 0.6rem 0.65rem;
+  border: 1px dashed rgba(148, 163, 184, 0.5);
+  border-radius: 10px;
+  color: #cbd5e1;
+  font-size: 0.74rem;
 }
 
 .video-modal__item {
@@ -2976,5 +3397,14 @@ button.cockpit-nointeract {
 
   .road-shell {
     min-height: min(56vh, 640px);
+  }
+
+  .scenic-gallery-body {
+    grid-template-columns: 1fr;
+    min-height: auto;
+  }
+
+  .scenic-photo-list {
+    max-height: 34vh;
   }
 }

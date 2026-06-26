@@ -73,6 +73,7 @@
       music: false,
       coffee: false,
       scenic: false,
+      scenicGallery: false,
       video: false,
     },
     video: {
@@ -88,9 +89,16 @@
       suggestedShop: null,
     },
     coffeeUi: { tab: 0, catIdx: 0 },
-    scenic: { compositeDataUrl: null, shooting: false, exteriorSeed: 0 },
+    scenic: {
+      compositeDataUrl: null,
+      shooting: false,
+      exteriorSeed: 0,
+      photos: [],
+      galleryIndex: 0,
+      slideshowTimer: null,
+    },
     /** 驾驶员监测（闭眼/疲劳弹窗）：false 时不做检测、不弹窗 */
-    dms: { enabled: true },
+    dms: { enabled: false },
     navSearch: "",
     /** 沿路 POI 多选：与订咖啡/接人途经点共用 waypoints 列表 */
     poiPickSession: null,
@@ -183,6 +191,31 @@
       artist: "Kevin MacLeod",
       album: "Incompetech · CC BY",
       url: "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Tabuk.mp3",
+    },
+  ];
+
+  /** 片库脚本异常/缓存错乱时的兜底列表，避免视频页空白。 */
+  var FALLBACK_VIDEO_LIST = [
+    {
+      id: 1,
+      title: "自然风景（Big Buck Bunny）",
+      duration: "0:10",
+      thumbnail: "🌸",
+      url: "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/720/Big_Buck_Bunny_720_10s_5MB.mp4",
+    },
+    {
+      id: 2,
+      title: "海洋世界（Jellyfish）",
+      duration: "0:10",
+      thumbnail: "🌊",
+      url: "https://test-videos.co.uk/vids/jellyfish/mp4/h264/720/Jellyfish_720_10s_2MB.mp4",
+    },
+    {
+      id: 3,
+      title: "旅行记录（Sample 20s）",
+      duration: "0:20",
+      thumbnail: "✈️",
+      url: "https://download.samplelib.com/mp4/sample-20s.mp4",
     },
   ];
 
@@ -1027,9 +1060,9 @@
   }
 
   function getVideoCatalog() {
-    return window.COCKPIT_VIDEO_LIST && window.COCKPIT_VIDEO_LIST.length
-      ? window.COCKPIT_VIDEO_LIST
-      : [];
+    if (window.COCKPIT_VIDEO_LIST && window.COCKPIT_VIDEO_LIST.length)
+      return window.COCKPIT_VIDEO_LIST;
+    return FALLBACK_VIDEO_LIST;
   }
 
   function formatVideoTime(sec) {
@@ -1090,7 +1123,13 @@
     if (!ul) return;
     var list = getVideoCatalog();
     ul.innerHTML = "";
-    if (!list.length) return;
+    if (!list.length) {
+      var em = document.createElement("li");
+      em.className = "video-modal__list-empty";
+      em.textContent = "暂无片源，请刷新页面后重试";
+      ul.appendChild(em);
+      return;
+    }
     var cur =
       ((state.video.index % list.length) + list.length) % list.length;
     var i;
@@ -1169,6 +1208,8 @@
     $("panelAc").classList.toggle("hidden", !state.panels.ac);
     $("panelCoffee").classList.toggle("hidden", !state.panels.coffee);
     $("panelScenic").classList.toggle("hidden", !state.panels.scenic);
+    if ($("panelScenicGallery"))
+      $("panelScenicGallery").classList.toggle("hidden", !state.panels.scenicGallery);
     if ($("panelVideo"))
       $("panelVideo").classList.toggle("hidden", !state.panels.video);
     syncDmsStatusPill();
@@ -1833,8 +1874,65 @@
         break;
       case "scenic_close":
         state.panels.scenic = false;
+        state.panels.scenicGallery = false;
+        stopScenicSlideshow();
         clearOverlayTimer("scenic");
         confirm(reply);
+        break;
+      case "scenic_gallery_open":
+        state.panels.scenicGallery = true;
+        if (!state.scenic.photos.length) state.panels.scenic = true;
+        syncScenicGalleryPanel();
+        confirm(reply || "好的，已打开打卡照片库。");
+        break;
+      case "scenic_gallery_close":
+        state.panels.scenicGallery = false;
+        stopScenicSlideshow();
+        if (document.fullscreenElement) {
+          document.exitFullscreen().catch(function () {});
+        }
+        confirm(reply || "好的，已退出照片库。");
+        break;
+      case "scenic_gallery_next":
+        state.panels.scenicGallery = true;
+        if (!state.scenic.photos.length) {
+          confirm(reply || "还没有打卡照片。");
+          break;
+        }
+        scenicGalleryNext(1);
+        confirm(reply || "下一张");
+        break;
+      case "scenic_gallery_prev":
+        state.panels.scenicGallery = true;
+        if (!state.scenic.photos.length) {
+          confirm(reply || "还没有打卡照片。");
+          break;
+        }
+        scenicGalleryNext(-1);
+        confirm(reply || "上一张");
+        break;
+      case "scenic_gallery_play_toggle":
+        state.panels.scenicGallery = true;
+        if (!state.scenic.photos.length) {
+          confirm(reply || "还没有打卡照片。");
+          break;
+        }
+        if (state.scenic.slideshowTimer) {
+          stopScenicSlideshow();
+          confirm(reply || "已停止轮播。");
+        } else {
+          startScenicSlideshow();
+          confirm(reply || "开始轮播照片。");
+        }
+        break;
+      case "scenic_gallery_fullscreen":
+        state.panels.scenicGallery = true;
+        if (!state.scenic.photos.length) {
+          confirm(reply || "还没有打卡照片。");
+          break;
+        }
+        scenicGalleryFullscreen();
+        confirm(reply || "好的，切换全屏预览。");
         break;
       case "dms_enable":
         state.dms.enabled = true;
@@ -1889,6 +1987,146 @@
 
   function ensureScenicExteriorVisible() {
     refreshScenicExteriorPreview(false);
+  }
+
+  function scenicPhotoLabel(ts) {
+    var d = ts instanceof Date ? ts : new Date(ts);
+    if (!isFinite(d.getTime())) d = new Date();
+    var pad = function (n) {
+      return (n < 10 ? "0" : "") + n;
+    };
+    return (
+      d.getFullYear() +
+      "-" +
+      pad(d.getMonth() + 1) +
+      "-" +
+      pad(d.getDate()) +
+      " " +
+      pad(d.getHours()) +
+      ":" +
+      pad(d.getMinutes()) +
+      ":" +
+      pad(d.getSeconds())
+    );
+  }
+
+  function stopScenicSlideshow() {
+    if (state.scenic.slideshowTimer) {
+      clearInterval(state.scenic.slideshowTimer);
+      state.scenic.slideshowTimer = null;
+    }
+    var pbtn = $("btnScenicPlay");
+    if (pbtn) pbtn.textContent = "轮播";
+  }
+
+  function renderScenicPhotoList() {
+    var ul = $("scenicPhotoList");
+    if (!ul) return;
+    ul.innerHTML = "";
+    var list = state.scenic.photos || [];
+    if (!list.length) {
+      var li = document.createElement("li");
+      li.className = "video-modal__list-empty";
+      li.textContent = "暂无打卡照片";
+      ul.appendChild(li);
+      return;
+    }
+    var cur = Math.max(0, Math.min(list.length - 1, state.scenic.galleryIndex || 0));
+    var i;
+    for (i = 0; i < list.length; i++) {
+      var item = list[i];
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "scenic-photo-item" + (i === cur ? " is-current" : "");
+      btn.setAttribute("data-scenic-index", String(i));
+      btn.textContent = "打卡照片 " + (i + 1);
+      var tm = document.createElement("span");
+      tm.className = "scenic-photo-item-time";
+      tm.textContent = scenicPhotoLabel(item.createdAt);
+      btn.appendChild(tm);
+      var li2 = document.createElement("li");
+      li2.appendChild(btn);
+      ul.appendChild(li2);
+    }
+  }
+
+  function syncScenicGalleryPanel() {
+    var list = state.scenic.photos || [];
+    var countEl = $("scenicGalleryCount");
+    if (countEl) countEl.textContent = list.length + " 张";
+    var emptyEl = $("scenicGalleryEmpty");
+    var stage = $("scenicGalleryStage");
+    var img = $("scenicGalleryPreview");
+    var meta = $("scenicGalleryMeta");
+    if (!list.length) {
+      state.scenic.galleryIndex = 0;
+      if (emptyEl) emptyEl.classList.remove("hidden");
+      if (stage) stage.classList.add("hidden");
+      if (meta) meta.textContent = "暂无照片";
+      stopScenicSlideshow();
+      renderScenicPhotoList();
+      return;
+    }
+    var ix = Math.max(0, Math.min(list.length - 1, state.scenic.galleryIndex || 0));
+    state.scenic.galleryIndex = ix;
+    var cur = list[ix];
+    if (img) img.src = cur.dataUrl || "";
+    if (meta) meta.textContent = "第 " + (ix + 1) + " / " + list.length + " 张 · " + scenicPhotoLabel(cur.createdAt);
+    if (emptyEl) emptyEl.classList.add("hidden");
+    if (stage) stage.classList.remove("hidden");
+    renderScenicPhotoList();
+  }
+
+  function saveScenicPhoto(dataUrl) {
+    if (!dataUrl) return;
+    var list = state.scenic.photos || [];
+    list.unshift({
+      id: "scenic_" + Date.now() + "_" + Math.floor(Math.random() * 1000),
+      dataUrl: dataUrl,
+      createdAt: new Date().toISOString(),
+    });
+    if (list.length > 60) list.length = 60;
+    state.scenic.photos = list;
+    state.scenic.galleryIndex = 0;
+    syncScenicGalleryPanel();
+  }
+
+  function scenicGalleryNext(step) {
+    var list = state.scenic.photos || [];
+    if (!list.length) return;
+    var s = step || 1;
+    var n = list.length;
+    var ix = ((state.scenic.galleryIndex || 0) + s) % n;
+    if (ix < 0) ix += n;
+    state.scenic.galleryIndex = ix;
+    syncScenicGalleryPanel();
+  }
+
+  function scenicGalleryFullscreen() {
+    var stage = $("scenicGalleryStage");
+    if (!stage) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(function () {});
+      return;
+    }
+    if (stage.requestFullscreen) {
+      stage.requestFullscreen().catch(function () {});
+    }
+  }
+
+  function startScenicSlideshow() {
+    var list = state.scenic.photos || [];
+    if (list.length < 2) {
+      speakOrToast("照片不足两张，无法轮播。");
+      stopScenicSlideshow();
+      return;
+    }
+    if (state.scenic.slideshowTimer) return;
+    state.scenic.slideshowTimer = setInterval(function () {
+      scenicGalleryNext(1);
+    }, 2400);
+    var pbtn = $("btnScenicPlay");
+    if (pbtn) pbtn.textContent = "停止轮播";
   }
 
   function playTrack(autoplay) {
@@ -1971,6 +2209,7 @@
         prev.src = state.scenic.compositeDataUrl;
         prev.classList.remove("hidden");
       }
+      saveScenicPhoto(state.scenic.compositeDataUrl);
     }
 
     ctx.fillStyle = "#111827";
@@ -2075,6 +2314,10 @@
       overlay_music: state.music.on,
       overlay_coffee: state.panels.coffee,
       overlay_scenic: state.panels.scenic,
+      overlay_scenic_gallery: state.panels.scenicGallery,
+      scenic_photo_count: state.scenic.photos.length,
+      scenic_gallery_index:
+        state.scenic.photos.length > 0 ? state.scenic.galleryIndex + 1 : 0,
       overlay_video: state.panels.video,
       dms_enabled: state.dms.enabled,
       video_now_index: state.video.index + 1,
@@ -2362,6 +2605,51 @@
     }
   }
 
+  function bindScenicGalleryPanel() {
+    $("btnScenicGalleryClose") &&
+      $("btnScenicGalleryClose").addEventListener("click", function () {
+        handleIntent("scenic_gallery_close", {}, "");
+      });
+    $("btnScenicPrev") &&
+      $("btnScenicPrev").addEventListener("click", function () {
+        handleIntent("scenic_gallery_prev", {}, "");
+      });
+    $("btnScenicNext") &&
+      $("btnScenicNext").addEventListener("click", function () {
+        handleIntent("scenic_gallery_next", {}, "");
+      });
+    $("btnScenicPlay") &&
+      $("btnScenicPlay").addEventListener("click", function () {
+        handleIntent("scenic_gallery_play_toggle", {}, "");
+      });
+    $("btnScenicFullscreen") &&
+      $("btnScenicFullscreen").addEventListener("click", function () {
+        handleIntent("scenic_gallery_fullscreen", {}, "");
+      });
+    var list = $("scenicPhotoList");
+    if (list) {
+      list.addEventListener("click", function (e) {
+        var btn = /** @type {HTMLElement} */ (e.target).closest("[data-scenic-index]");
+        if (!btn) return;
+        var idx = parseInt(btn.getAttribute("data-scenic-index") || "", 10);
+        if (!isFinite(idx)) return;
+        state.panels.scenicGallery = true;
+        state.scenic.galleryIndex = idx;
+        syncScenicGalleryPanel();
+      });
+    }
+    document.addEventListener("keydown", function (e) {
+      if (!state.panels.scenicGallery) return;
+      if (e.key === "Escape" && !document.fullscreenElement) {
+        handleIntent("scenic_gallery_close", {}, "");
+      } else if (e.key === "ArrowRight") {
+        scenicGalleryNext(1);
+      } else if (e.key === "ArrowLeft") {
+        scenicGalleryNext(-1);
+      }
+    });
+  }
+
   function bindUi() {
     bindNavOverlay();
     $("btnMsgDemoSend") &&
@@ -2457,7 +2745,12 @@
       $("volUp").addEventListener("click", function () {
         handleIntent("music_volume_up", {}, "");
       });
+    $("composePreview") &&
+      $("composePreview").addEventListener("click", function () {
+        handleIntent("scenic_gallery_open", {}, "");
+      });
     bindVideoPanel();
+    bindScenicGalleryPanel();
   }
 
   window.Cockpit = {
@@ -2472,6 +2765,7 @@
   document.addEventListener("DOMContentLoaded", function () {
     syncDmsToFatigueModule();
     syncChrome();
+    syncScenicGalleryPanel();
     setupCam();
     bindAcPanel();
     bindUi();

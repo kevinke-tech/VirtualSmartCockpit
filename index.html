@@ -6,15 +6,8 @@
   <title>汽车虚拟座舱 · Virtual Smart Cockpit</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="css/cockpit.css" />
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
-    }
-  }
-  </script>
+  <link rel="stylesheet" href="css/cockpit.css?v=layoutleftfont5" />
+  <script src="js/vendor/three.min.js?v=3r2"></script>
 </head>
 <body class="theme-sr">
   <header class="topbar">
@@ -23,9 +16,9 @@
       class="dms-status-pill dms-status-pill--on"
       role="status"
       aria-live="polite"
-      aria-label="驾驶员监测已开启"
+      aria-label="驾驶员监测已关闭"
     >
-      DMS · 开启
+      DMS · 关闭
     </div>
     <div class="tb-brand">
       <span class="brand-mark" aria-hidden="true">◎</span>
@@ -113,6 +106,29 @@
             </button>
           </div>
         </div>
+      </article>
+
+      <article id="voxCard" class="card glass vox-card" aria-labelledby="voxCardTitle">
+        <div class="vox-card__head">
+          <h3 id="voxCardTitle" class="vox-card__title">VOX 智能体 / 技能工坊</h3>
+          <span id="voxStatus" class="vox-status-pill vox-status-pill--idle">未连接</span>
+        </div>
+        <p class="vox-card__hint">直接在座舱里调用 VOX 的规划器与动态技能合成能力（合成后可立即执行）。</p>
+        <div class="vox-backend-row">
+          <label for="voxBackendInput">VOX 后端</label>
+          <input id="voxBackendInput" type="text" value="http://127.0.0.1:5001" autocomplete="off" />
+          <button type="button" id="voxBackendSaveBtn">连接</button>
+        </div>
+        <div class="vox-quick-row">
+          <button type="button" class="vox-quick-btn" data-vox-prompt="30秒后提醒我喝水">30秒提醒</button>
+          <button type="button" class="vox-quick-btn" data-vox-prompt="看到我挥手时提醒我">视觉监视</button>
+          <button type="button" class="vox-quick-btn" data-vox-prompt="给我生成一个技能：随机讲一个动物冷知识">动态造技能</button>
+        </div>
+        <div id="voxLog" class="vox-log" role="log" aria-live="polite"></div>
+        <form id="voxPromptForm" class="vox-form">
+          <input id="voxPromptInput" type="text" placeholder="输入要让 VOX 执行的任务..." autocomplete="off" />
+          <button type="submit">发送</button>
+        </form>
       </article>
     </section>
 
@@ -393,7 +409,7 @@
       <h2>风景打卡</h2>
       <p class="scenic-voice-hint">
         全程语音控制 · 说<strong>「开始拍照」</strong>、<strong>「拍照」</strong>即倒计时抓拍；也可对着<strong>车内摄像头</strong>比 ✌（剪刀手）触发抓拍。
-        说<strong>「关闭打卡」</strong>退出。车外为汽车自驾/公路与城市风景类虚拟取景，打开本页即预载。
+        说<strong>「查看打卡照片」</strong>可进入照片库，支持列表预览、全屏播放；说<strong>「关闭打卡」</strong>退出。车外为汽车自驾/公路与城市风景类虚拟取景，打开本页即预载。
       </p>
       <div class="scenic-grid">
         <div class="cam-box">
@@ -412,6 +428,37 @@
       <div id="scenicCountdown" class="scenic-countdown hidden"></div>
       <canvas id="composeCanvas" class="compose-canvas hidden"></canvas>
       <img id="composePreview" class="compose-preview hidden" alt="合成预览" />
+    </div>
+  </div>
+
+  <div id="panelScenicGallery" class="overlay scenic-gallery-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="scenicGalleryTitle">
+    <div class="overlay-inner scenic-gallery-inner glass">
+      <header class="scenic-gallery-head">
+        <h2 id="scenicGalleryTitle">打卡照片库</h2>
+        <span id="scenicGalleryCount" class="scenic-gallery-badge">0 张</span>
+        <button type="button" id="btnScenicGalleryClose" class="scenic-gallery-close" aria-label="关闭照片库">×</button>
+      </header>
+      <p class="scenic-gallery-hint">语音可说「下一张」「上一张」「全屏播放照片」「退出照片库」。</p>
+      <div class="scenic-gallery-body">
+        <aside class="scenic-gallery-list-wrap" aria-label="打卡照片列表">
+          <ul id="scenicPhotoList" class="scenic-photo-list"></ul>
+        </aside>
+        <section class="scenic-gallery-preview-wrap">
+          <div id="scenicGalleryEmpty" class="scenic-gallery-empty">还没有打卡照片，先说「开始拍照」试试。</div>
+          <figure id="scenicGalleryStage" class="scenic-gallery-stage hidden">
+            <img id="scenicGalleryPreview" class="scenic-gallery-preview" alt="打卡照片预览" />
+          </figure>
+          <div class="scenic-gallery-toolbar">
+            <span id="scenicGalleryMeta" class="scenic-gallery-meta">—</span>
+            <div class="scenic-gallery-actions">
+              <button type="button" id="btnScenicPrev" class="video-btn">上一张</button>
+              <button type="button" id="btnScenicNext" class="video-btn">下一张</button>
+              <button type="button" id="btnScenicPlay" class="video-btn">轮播</button>
+              <button type="button" id="btnScenicFullscreen" class="video-btn video-btn--primary">全屏</button>
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
   </div>
 
@@ -485,13 +532,14 @@
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="js/nav-osm.js"></script>
-  <script src="js/cockpit-video-catalog.js"></script>
+  <script src="js/nav-osm.js?v=navmapbg1"></script>
+  <script src="js/cockpit-video-catalog.js?v=vidcat2"></script>
   <script src="js/tts-one-mouth.js"></script>
-  <script src="js/cockpit-app.js"></script>
-  <script type="module" src="js/road-three.js?v=gltfcar1"></script>
-  <script src="js/voice-cockpit.js"></script>
+  <script src="js/cockpit-app.js?v=dmsdefaultoff1"></script>
+  <script src="js/vox-panel.js?v=voxws3"></script>
+  <script src="js/road-three.js?v=roadrecover2"></script>
+  <script src="js/voice-cockpit.js?v=vadfix1"></script>
   <script src="js/scenic-gesture-v.js"></script>
-  <script src="js/fatigue-dms.js"></script>
+  <script src="js/fatigue-dms.js?v=dmsdefaultoff1"></script>
 </body>
 </html>

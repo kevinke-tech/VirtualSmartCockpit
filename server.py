@@ -193,6 +193,12 @@ VALID_ACTIONS = {
     "scenic_open",
     "scenic_take_photo",
     "scenic_close",
+    "scenic_gallery_open",
+    "scenic_gallery_close",
+    "scenic_gallery_next",
+    "scenic_gallery_prev",
+    "scenic_gallery_play_toggle",
+    "scenic_gallery_fullscreen",
     # DMS 驾驶员监测（闭眼 / 疲劳弹窗）
     "dms_enable",
     "dms_disable",
@@ -255,6 +261,11 @@ def generate_cockpit_prompt(context: dict, user_input: str) -> str:
 - scenic_open — 想打开风景打卡页、想记录途中风景（只打开界面，不抓拍）
 - scenic_take_photo — 开始拍照、抓拍、拍一张、倒计时时快门等（打开界面并启动 3-2-1 倒计时合成）
 - scenic_close — 退出/关闭风景打卡
+- scenic_gallery_open — 查看/打开打卡照片库（显示已保存照片列表与预览）
+- scenic_gallery_close — 退出/关闭打卡照片库
+- scenic_gallery_next / scenic_gallery_prev — 照片库上一张/下一张
+- scenic_gallery_play_toggle — 开始或停止照片轮播
+- scenic_gallery_fullscreen — 照片库全屏预览
 - dms_enable — 打开/开启**驾驶员监测（DMS）**：闭眼检测与疲劳语音/弹窗；context.dms_enabled 为 false 时常用
 - dms_disable — **关闭 DMS**：停止闭眼检测、不再弹出疲劳驾驶窗；context.dms_enabled 为 true 时常用
 - msg_read_last — 朗读/查询短信与消息：如「读一下信息」「谁发的」「刚收到什么」
@@ -267,6 +278,7 @@ def generate_cockpit_prompt(context: dict, user_input: str) -> str:
 - 【空调体感 — 模糊说法】context 含 ac_driver_temp_set（主驾设定温度）等：用户说「冷、太冷、我觉得冷」→ **ac_set_temperature**，在 ac_driver_temp_set 基础上**调高**约 2℃（或用户说具体度数则用该值），并打开空调界面；说「闷、很闷、透不过气」→ **ac_comfort_stuffy**；说「看不见前面路、起雾、除雾」→ **ac_defog_front**。fast 规则已覆盖常见句式，你需处理变体。
 - context.dms_enabled 为 false 时用户说「打开驾驶员监测 / 开启DMS」→ dms_enable；为 true 时说「关闭DMS / 关掉疲劳监测」→ dms_disable
 - context.overlay_video 为 true 时，用户说「暂停 / 下一个 / 大点声 / 退出」优先指**视频**而不是音乐（除非明确说听歌）
+- context.overlay_scenic_gallery 为 true 时，用户说「退出」「上一张」「下一张」「全屏」优先指打卡照片库
 - 用户说「看电影」「看视频」「想看电影」→ video_open
 - 用户说「顺便去一趟 / 途经 / 加一站 / 绕一下 …」→ nav_add_waypoint（params.name 填地名；若用户只说「信息里那个地方」则用 last_pickup_place）
 - 用户说「顺路 / 顺便 / 沿途 / 沿路 + 去接某人、接朋友、帮人接 …」意为**在原导航基础上加接人点**，→ **nav_add_waypoint**（name 用人名对应消息里的接人地点或 last_pickup_place），**禁止** nav_set_destination 覆盖原终点
@@ -978,6 +990,80 @@ def _fast_video_intents(norm: str, context: dict) -> Optional[dict]:
     return None
 
 
+def _fast_scenic_gallery_intents(norm: str, context: dict) -> Optional[dict]:
+    """打卡照片库语音控制。"""
+    ctx = context or {}
+    in_gallery = bool(ctx.get("overlay_scenic_gallery"))
+
+    if in_gallery:
+        for kw in ("退出照片库", "关闭照片库", "退出打卡照片", "关闭打卡照片", "关闭相册"):
+            if kw in norm:
+                return {
+                    "action": "scenic_gallery_close",
+                    "params": {},
+                    "response": "好的，已退出打卡照片库。",
+                    "match": "fast",
+                }
+        if norm in ("退出", "关闭", "退出吧"):
+            return {
+                "action": "scenic_gallery_close",
+                "params": {},
+                "response": "好的，已退出打卡照片库。",
+                "match": "fast",
+            }
+        for kw in ("下一张", "下一页", "往后翻", "后一张"):
+            if kw in norm:
+                return {
+                    "action": "scenic_gallery_next",
+                    "params": {},
+                    "response": "好的，下一张。",
+                    "match": "fast",
+                }
+        for kw in ("上一张", "上一页", "往前翻", "前一张"):
+            if kw in norm:
+                return {
+                    "action": "scenic_gallery_prev",
+                    "params": {},
+                    "response": "好的，上一张。",
+                    "match": "fast",
+                }
+        for kw in ("全屏", "全屏播放", "放大全屏", "全屏看图"):
+            if kw in norm:
+                return {
+                    "action": "scenic_gallery_fullscreen",
+                    "params": {},
+                    "response": "好的，切换全屏。",
+                    "match": "fast",
+                }
+        for kw in ("开始轮播", "轮播", "自动播放照片", "放映照片"):
+            if kw in norm:
+                return {
+                    "action": "scenic_gallery_play_toggle",
+                    "params": {},
+                    "response": "好的，开始轮播。",
+                    "match": "fast",
+                }
+        for kw in ("停止轮播", "暂停轮播", "停止播放照片"):
+            if kw in norm:
+                return {
+                    "action": "scenic_gallery_play_toggle",
+                    "params": {},
+                    "response": "好的，已停止轮播。",
+                    "match": "fast",
+                }
+
+    for kw in ("查看打卡照片", "查看照片", "打开照片库", "打开打卡照片", "查看相册", "打开相册"):
+        if kw in norm:
+            return {
+                "action": "scenic_gallery_open",
+                "params": {},
+                "response": "好的，已打开打卡照片库。",
+                "match": "fast",
+            }
+
+    return None
+
+
 def _fast_dms_intents(norm: str, context: dict) -> Optional[dict]:
     """语音开关驾驶员监测（与前端 context.dms_enabled 一致）。"""
 
@@ -1221,6 +1307,10 @@ def fast_match_cockpit(text: str, context: dict) -> Optional[dict]:
     vf = _fast_video_intents(t, context)
     if vf:
         return vf
+
+    sg = _fast_scenic_gallery_intents(t, context)
+    if sg:
+        return sg
 
     dmsf = _fast_dms_intents(t, context)
     if dmsf:

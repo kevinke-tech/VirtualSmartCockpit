@@ -1,10 +1,7 @@
 /**
  * Third-person highway (THREE.js) — 参考车载 SR / 赛车视角。
- * 默认使用 Khronos Sample Models 「ToyCar」glTF（CC0）；见 models/ToyCar.glb。加载失败时回退程序化车体。
+ * 优先保证行车页稳定渲染；车辆使用程序化模型（避免外部模块加载失败导致整屏空白）。
  */
-
-import * as THREE from "three";
-import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 var renderer;
 var scene;
@@ -20,7 +17,7 @@ var trafficMeshes = [];
 var guideMesh;
 /** `/models/` 静态资源：ToyCar 展示 sheen/transmission/clearcoat，体积小、许可清晰（CC0） */
 var CAR_GLTF_URL = "models/ToyCar.glb";
-/** 归一化后用于 clone 的根 Group；null 则用 buildCar */
+/** 当前版本固定走程序化车体；预留后续模型化恢复。 */
 var carPreparedProto = null;
 /** 与车速同步的「世界流动」系数（米/帧量级，与 traffic 一致） */
 var FLOW_K = 0.168;
@@ -332,28 +329,8 @@ function pseudoRand(seed) {
   }
 
   function loadToyCarPrototype() {
-    return new Promise(function (resolve) {
-      var loader = new GLTFLoader();
-      loader.load(
-        CAR_GLTF_URL,
-        function (gltf) {
-          try {
-            carPreparedProto = prepareToyCarHierarchy(gltf.scene);
-            resolve(carPreparedProto);
-          } catch (e) {
-            console.warn("[Road3D] prepare ToyCar:", e);
-            carPreparedProto = null;
-            resolve(null);
-          }
-        },
-        undefined,
-        function (err) {
-          console.warn("[Road3D] GLB load fallback to procedural:", err);
-          carPreparedProto = null;
-          resolve(null);
-        }
-      );
-    });
+    carPreparedProto = null;
+    return Promise.resolve(null);
   }
 
   /** Dashed lane divider at fixed lateral x (world space). Three lanes ⇒ two dividers at ±laneWidth/2. */

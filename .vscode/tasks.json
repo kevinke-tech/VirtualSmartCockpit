@@ -23,11 +23,48 @@
       }
     },
     {
+      "label": "🚀 Run VOX Backend",
+      "type": "shell",
+      "command": "cd ../vox && ( [ -x .venv/bin/python ] && exec .venv/bin/python server.py || exec python server.py )",
+      "windows": {
+        "command": "$voxRoot = (Resolve-Path ..\\vox).Path; $venvRoot = Join-Path $voxRoot '.venv-win'; $py = Join-Path $venvRoot 'Scripts\\python.exe'; if (Test-Path $py) { $maj = (& $py -c 'import sys; print(sys.version_info[0])'); $min = (& $py -c 'import sys; print(sys.version_info[1])'); if ((\"$maj.$min\") -ne '3.12') { Remove-Item -Recurse -Force $venvRoot -ErrorAction SilentlyContinue } }; if (!(Test-Path $py)) { py -3.12 -m venv $venvRoot }; $py = Join-Path $venvRoot 'Scripts\\python.exe'; $needInstall = $true; if (Test-Path $py) { & $py -c 'import httpx, claude_agent_sdk' 2>$null; if ($LASTEXITCODE -eq 0) { $needInstall = $false } }; if ($needInstall) { & $py -m pip install -U pip; & $py -m pip install -r (Join-Path $voxRoot 'requirements.txt'); & $py -m pip install claude-agent-sdk }; Set-Location $voxRoot; & $py server.py"
+      },
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "group": "cockpit",
+        "clear": true
+      }
+    },
+    {
+      "label": "🚀 Run Cockpit + VOX",
+      "dependsOn": ["🚀 Run Demo", "🚀 Run VOX Backend"],
+      "dependsOrder": "parallel",
+      "problemMatcher": []
+    },
+    {
       "label": "🛑 Stop Demo",
       "type": "shell",
       "command": "PID=$(lsof -ti :5002 2>/dev/null); if [ -n \"$PID\" ]; then kill -9 $PID; fi; echo 'Cockpit (port 5002) stopped.'",
       "windows": {
         "command": "$p = Get-NetTCPConnection -LocalPort 5002 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique; if ($p) { $p | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }; Write-Host 'Cockpit (port 5002) stopped.' } else { Write-Host 'No listener on port 5002.' }"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": true
+      }
+    },
+    {
+      "label": "🛑 Stop Cockpit + VOX",
+      "type": "shell",
+      "command": "for p in 5002 5001; do PID=$(lsof -ti :$p 2>/dev/null); if [ -n \"$PID\" ]; then kill -9 $PID; fi; done; echo 'Cockpit(5002) + VOX(5001) stopped.'",
+      "windows": {
+        "command": "$ports = @(5002,5001); foreach ($port in $ports) { $p = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique; if ($p) { $p | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue } } }; Write-Host 'Cockpit(5002) + VOX(5001) stopped.'"
       },
       "problemMatcher": [],
       "presentation": {
