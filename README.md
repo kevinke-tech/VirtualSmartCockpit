@@ -185,26 +185,62 @@ OCC_VLLM_TIMEOUT_SEC=45
 - 关闭会议模式后恢复持续监听；空格键仍可随时按住说话。
 - ASR 日志会输出音频时长、RMS、峰值和削波比例，便于排查麦克风问题。
 
-## 可选：VOX 动态技能
+## 可选：VOX 动态技能构建
 
-VOX 不属于本仓库的必需依赖。只运行 `run-demo.ps1` 即可使用座舱主体功能。
+VOX 是本项目的可选扩展，开源地址：
 
-如果团队同时拥有 VOX 仓库，并放在本仓库可解析的相对位置 `../claudeCode/vox`，Windows 下可以：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run-vox.ps1
+```text
+https://github.com/kevinke-tech/vox
 ```
 
-或者同时启动两个服务：
+请根据需要选择一种运行方式。
+
+### 不需要体验动态技能构建
+
+不需要下载 VOX。按照前面的快速开始说明，仅启动 Virtual Smart Cockpit 即可：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run-demo.ps1
+```
+
+导航、空调、音乐、消息、咖啡点单、语音识别、本地意图识别、DMS/OCC 等座舱主体功能仍可使用。VOX 面板显示未连接时可以忽略。
+
+### 需要体验动态技能构建
+
+需要额外下载 VOX。推荐将两个仓库放在同一个父目录下：
+
+```text
+workspace/
+├── VirtualSmartCockpit/
+└── vox/
+```
+
+在 Virtual Smart Cockpit 项目目录中执行：
+
+```powershell
+git clone https://github.com/kevinke-tech/vox.git ..\vox
+```
+
+先按照 [VOX README](https://github.com/kevinke-tech/vox#readme) 配置其 `.env.local` 和动态技能构建所需的 Claude Agent SDK 等依赖，然后同时启动两个服务：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run-all.ps1
 ```
 
+也可以在两个终端中分别启动：
+
+```powershell
+# 终端 1：Virtual Smart Cockpit
+powershell -ExecutionPolicy Bypass -File .\scripts\run-demo.ps1
+
+# 终端 2：VOX
+powershell -ExecutionPolicy Bypass -File .\scripts\run-vox.ps1
+```
+
 - Cockpit：`http://127.0.0.1:5002`
 - VOX：`http://127.0.0.1:5001`
 
-VOX 使用它自己的依赖和环境配置，请参考 VOX 仓库文档。没有 VOX 仓库的同事不要运行 `run-vox.ps1` 或 `run-all.ps1`。
+VOX 使用独立的虚拟环境和密钥配置；其动态技能构建可能调用付费模型，请留意 VOX README 中的费用及安全说明。
 
 ## 常见问题
 

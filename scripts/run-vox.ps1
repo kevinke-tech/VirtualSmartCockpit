@@ -1,7 +1,19 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$voxRoot = Resolve-Path (Join-Path $repoRoot "..\claudeCode\vox")
+$voxCandidates = @(
+  (Join-Path $repoRoot "..\vox"),
+  (Join-Path $repoRoot "..\claudeCode\vox")
+)
+$voxRoot = $voxCandidates |
+  Where-Object { Test-Path (Join-Path $_ "server.py") } |
+  Select-Object -First 1
+
+if (!$voxRoot) {
+  throw "VOX repository not found. Clone it beside this repository: git clone https://github.com/kevinke-tech/vox.git ..\vox"
+}
+
+$voxRoot = (Resolve-Path $voxRoot).Path
 $venvRoot = Join-Path $voxRoot ".venv-win"
 $py = Join-Path $venvRoot "Scripts\python.exe"
 
