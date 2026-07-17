@@ -3,12 +3,9 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
-if (Test-Path ".venv\Scripts\Activate.ps1") {
-  . ".venv\Scripts\Activate.ps1"
-} elseif (Test-Path "..\vui\.venv\Scripts\Activate.ps1") {
-  . "..\vui\.venv\Scripts\Activate.ps1"
-} elseif (Test-Path "venv\Scripts\Activate.ps1") {
-  . "venv\Scripts\Activate.ps1"
+$python = Join-Path $repoRoot ".venv\Scripts\python.exe"
+if (!(Test-Path $python)) {
+  throw "Missing .venv. Run: powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1"
 }
 
-python server.py
+& $python server.py

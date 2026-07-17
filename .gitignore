@@ -2,5 +2,12 @@
 .env.local
 .env.*.local
 __pycache__/
+*.py[cod]
 .venv/
 venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+.DS_Store
+.idea/

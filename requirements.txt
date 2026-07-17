@@ -7,3 +7,6 @@ pydantic>=2.0
 
 # Offline ASR (same stack as sibling vui project)
 funasr>=1.0
+
+# Local intent embedding (optional — without it, fuzzy string fallback is used)
+sentence-transformers>=2.2.0

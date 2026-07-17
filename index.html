@@ -6,7 +6,7 @@
   <title>汽车虚拟座舱 · Virtual Smart Cockpit</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="css/cockpit.css?v=layoutleftfont5" />
+  <link rel="stylesheet" href="css/cockpit.css?v=meetingptt1" />
   <script src="js/vendor/three.min.js?v=3r2"></script>
 </head>
 <body class="theme-sr">
@@ -33,6 +33,9 @@
       <span class="status-text">语音：点击右下角球体</span>
     </div>
     <div id="toastLine" class="toast-line"></div>
+    <button type="button" id="occTopToggle" class="occ-top-toggle" title="打开/关闭乘员感知浮窗" aria-expanded="true">
+      OCC
+    </button>
     <div class="tb-gauges">
       <span class="sig-pill">蓝牙</span>
       <span class="bat-pill">续航 <strong>85%</strong></span>
@@ -113,22 +116,25 @@
           <h3 id="voxCardTitle" class="vox-card__title">VOX 智能体 / 技能工坊</h3>
           <span id="voxStatus" class="vox-status-pill vox-status-pill--idle">未连接</span>
         </div>
-        <p class="vox-card__hint">直接在座舱里调用 VOX 的规划器与动态技能合成能力（合成后可立即执行）。</p>
+        <p class="vox-card__hint">技能列表模式：可直接激活、停用、删除 VOX 技能。</p>
         <div class="vox-backend-row">
           <label for="voxBackendInput">VOX 后端</label>
           <input id="voxBackendInput" type="text" value="http://127.0.0.1:5001" autocomplete="off" />
           <button type="button" id="voxBackendSaveBtn">连接</button>
         </div>
-        <div class="vox-quick-row">
-          <button type="button" class="vox-quick-btn" data-vox-prompt="30秒后提醒我喝水">30秒提醒</button>
-          <button type="button" class="vox-quick-btn" data-vox-prompt="看到我挥手时提醒我">视觉监视</button>
-          <button type="button" class="vox-quick-btn" data-vox-prompt="给我生成一个技能：随机讲一个动物冷知识">动态造技能</button>
+        <div id="voxSkillsPanel" class="vox-skills-panel">
+          <div class="vox-skills-header">
+            <span class="vox-skills-title">技能列表</span>
+            <div class="vox-skills-header-actions">
+              <button type="button" id="voxSkillsDeleteAllBtn" class="vox-skills-delete-all" title="删除全部技能">清空</button>
+              <span id="voxSkillCount" class="vox-skills-count">0</span>
+              <button type="button" id="voxSkillsRefreshBtn" class="vox-skills-refresh" title="刷新技能列表">↻</button>
+            </div>
+          </div>
+          <ul id="voxSkillList" class="vox-skills-list">
+            <li class="vox-skills-empty">加载中…</li>
+          </ul>
         </div>
-        <div id="voxLog" class="vox-log" role="log" aria-live="polite"></div>
-        <form id="voxPromptForm" class="vox-form">
-          <input id="voxPromptInput" type="text" placeholder="输入要让 VOX 执行的任务..." autocomplete="off" />
-          <button type="submit">发送</button>
-        </form>
       </article>
     </section>
 
@@ -367,6 +373,11 @@
       <div class="coffee-body">
         <aside id="coffeeCatNav" class="coffee-cat-nav"></aside>
         <main class="coffee-main">
+          <p class="coffee-voice-hint">
+            全程语音点单 · 说<strong>「生椰拿铁」</strong>、<strong>「标准美式」</strong>、<strong>「摩卡」</strong>等加购；
+            说<strong>「再来一杯」</strong>重复上一款；说<strong>「就这些」「去结账」</strong>弹出收款码；
+            说<strong>「关闭咖啡」</strong>退出。
+          </p>
           <div id="coffeeOrderedBlock" class="coffee-ordered-panel" aria-live="polite"></div>
           <div id="coffeeShopSuggest" class="coffee-shop-suggest" aria-live="polite"></div>
           <div class="coffee-banner">
@@ -522,24 +533,75 @@
     </div>
   </div>
 
+  <div id="occFloat" class="occ-float glass" role="dialog" aria-labelledby="occCardTitle" aria-modal="false">
+    <div id="occFloatDrag" class="occ-float__drag" title="拖动浮窗">
+      <h3 id="occCardTitle" class="occ-card__title">乘员感知 OCC</h3>
+      <span id="occStatusPill" class="occ-status-pill">等待人脸</span>
+      <div class="occ-float__actions">
+        <button type="button" id="occFloatMin" class="occ-float__btn" aria-label="最小化">−</button>
+        <button type="button" id="occFloatClose" class="occ-float__btn" aria-label="关闭">×</button>
+      </div>
+    </div>
+    <article id="occCard" class="occ-card">
+        <p class="occ-card__hint">摄像头前最近乘客（需检测到人脸）· MediaPipe 实时 · VLM 低置信兜底</p>
+      <dl class="occ-metrics">
+        <div class="occ-metric">
+          <dt>手势</dt>
+          <dd id="occGestureVal" class="occ-metric__val">—</dd>
+          <dd id="occGestureMeta" class="occ-metric__meta">—</dd>
+        </div>
+        <div class="occ-metric">
+          <dt>表情</dt>
+          <dd id="occExpressionVal" class="occ-metric__val">—</dd>
+          <dd id="occExpressionMeta" class="occ-metric__meta">—</dd>
+        </div>
+        <div class="occ-metric">
+          <dt>肢体</dt>
+          <dd id="occBodyVal" class="occ-metric__val">—</dd>
+          <dd id="occBodyMeta" class="occ-metric__meta">—</dd>
+        </div>
+        <div class="occ-metric">
+          <dt>年龄</dt>
+          <dd id="occAgeVal" class="occ-metric__val">—</dd>
+          <dd id="occAgeMeta" class="occ-metric__meta">—</dd>
+        </div>
+        <div class="occ-metric">
+          <dt>性别</dt>
+          <dd id="occGenderVal" class="occ-metric__val">—</dd>
+          <dd id="occGenderMeta" class="occ-metric__meta">—</dd>
+        </div>
+      </dl>
+      <p id="occVlmHint" class="occ-vlm-hint">VLM 按需触发（低置信度 / 年龄 / 性别）</p>
+    </article>
+  </div>
+
+  <button type="button" id="occFloatLaunch" class="occ-float-launch hidden" title="打开乘员感知 OCC" aria-label="打开乘员感知 OCC">
+    👤 OCC
+  </button>
+
   <div id="vuiContainer" class="vui-container glass">
     <div class="vui-mic-core" id="vuiMicCore">
       <div class="mic-icon-large">🎤</div>
     </div>
     <div class="vui-status-text" id="vuiStatusText">语音未启动</div>
     <div class="vui-command-text" id="vuiCommandText"></div>
-    <div class="vui-hint">唤醒拾音后<strong>全程语音</strong>：ASR → /intent → 执行。可说「读信息」「看电影」「打开驾驶员监测」或「关闭DMS」「暂停」「退出视频播放」「导航到…」「顺便去加油站」。</div>
+    <label class="vui-meeting-toggle" title="避免把扬声器中的会议人声当作语音指令">
+      <input type="checkbox" id="vuiMeetingMode" checked>
+      <span>会议模式（按住空格或麦克风说话）</span>
+    </label>
+    <div class="vui-hint">会议模式下，松开按键后才会送入 ASR，可避免持续拾取电脑扬声器声音。关闭后恢复全程语音监听。</div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script src="js/nav-osm.js?v=navmapbg1"></script>
+  <script src="js/nav-osm.js?v=navpoi1"></script>
   <script src="js/cockpit-video-catalog.js?v=vidcat2"></script>
-  <script src="js/tts-one-mouth.js"></script>
-  <script src="js/cockpit-app.js?v=dmsdefaultoff1"></script>
-  <script src="js/vox-panel.js?v=voxws3"></script>
-  <script src="js/road-three.js?v=roadrecover2"></script>
-  <script src="js/voice-cockpit.js?v=vadfix1"></script>
-  <script src="js/scenic-gesture-v.js"></script>
-  <script src="js/fatigue-dms.js?v=dmsdefaultoff1"></script>
+  <script src="js/tts-one-mouth.js?v=scenictts1"></script>
+  <script src="js/cockpit-app.js?v=msgread1"></script>
+  <script src="js/vox-panel.js?v=voxskills4"></script>
+  <script src="js/road-three.js?v=voiceperf1"></script>
+  <script src="js/voice-cockpit.js?v=pttfix1"></script>
+  <script src="js/scenic-gesture-v.js?v=voiceperf1"></script>
+  <script src="js/occ-perception.js?v=voiceperf1"></script>
+  <script src="js/fatigue-dms.js?v=voiceperf1"></script>
 </body>
 </html>

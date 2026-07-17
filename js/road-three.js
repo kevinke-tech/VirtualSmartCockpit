@@ -7,6 +7,7 @@ var renderer;
 var scene;
 var camera;
 var clock = new THREE.Clock();
+var lastVoiceRenderAt = 0;
 
 var laneWidth = 4.1;
 var numLanes = 3;
@@ -681,8 +682,16 @@ function pseudoRand(seed) {
     }
   }
 
-  function tick() {
+  function tick(frameAt) {
     requestAnimationFrame(tick);
+    frameAt = frameAt || performance.now();
+    if (
+      window.__cockpitVoiceCapturing &&
+      frameAt - lastVoiceRenderAt < 50
+    ) {
+      return;
+    }
+    lastVoiceRenderAt = frameAt;
     var st = getState();
     var delta = Math.min(clock.getDelta(), 0.1);
     var spd = st ? Math.max(0, st.speedKmh || 0) : 0;

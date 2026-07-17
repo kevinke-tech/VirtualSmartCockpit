@@ -227,6 +227,7 @@
     running = true;
     inferPending = false;
     var videoTs = 0;
+    var lastFrameAt = 0;
 
     worker.addEventListener("message", function onWorkerResult(ev) {
       var d = ev.data || {};
@@ -253,12 +254,20 @@
         return;
       }
 
+      // DMS 10fps 已足够覆盖 1.65s 闭眼判定；语音采集中暂停抓帧，
+      // 避免 createImageBitmap 与音频主线程回调争抢。
+      if (window.__cockpitVoiceCapturing || now - lastFrameAt < 100) {
+        rafId = requestAnimationFrame(tick);
+        return;
+      }
+
       if (inferPending) {
         rafId = requestAnimationFrame(tick);
         return;
       }
 
       inferPending = true;
+      lastFrameAt = now;
       createImageBitmap(video)
         .then(function (bmp) {
           videoTs += 33;

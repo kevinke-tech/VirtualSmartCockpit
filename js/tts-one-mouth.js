@@ -77,31 +77,31 @@
       if (draining || queue.length === 0) return;
       draining = true;
       var gen = playbackGen;
-      var text = queue[0];
+      var item = queue[0];
+      var text = item.text;
 
       try {
         window.__cockpitTtsQueuedCount = queue.length;
       } catch (__e) {}
 
+      function finishItem() {
+        if (gen !== playbackGen) return;
+        var done = queue.shift();
+        draining = false;
+        try {
+          window.__cockpitTtsQueuedCount = queue.length;
+        } catch (__e) {}
+        if (done && typeof done.onEnd === "function") {
+          try {
+            done.onEnd();
+          } catch (_e4) {}
+        }
+        drain();
+      }
+
       impl(text, {
-        onEnd: function () {
-          if (gen !== playbackGen) return;
-          queue.shift();
-          draining = false;
-          try {
-            window.__cockpitTtsQueuedCount = queue.length;
-          } catch (__e) {}
-          drain();
-        },
-        onError: function () {
-          if (gen !== playbackGen) return;
-          queue.shift();
-          draining = false;
-          try {
-            window.__cockpitTtsQueuedCount = queue.length;
-          } catch (__e) {}
-          drain();
-        },
+        onEnd: finishItem,
+        onError: finishItem,
       });
     });
   }
@@ -123,7 +123,10 @@
       draining = false;
     }
 
-    queue.push(text);
+    queue.push({
+      text: text,
+      onEnd: typeof opts.onEnd === "function" ? opts.onEnd : null,
+    });
     try {
       window.__cockpitTtsQueuedCount = queue.length;
     } catch (__e) {}

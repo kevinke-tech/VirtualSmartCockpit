@@ -5,7 +5,7 @@
   "use strict";
 
   var map = null;
-  var layers = { basemap: null, route: null, car: null, dest: null };
+  var layers = { basemap: null, route: null, car: null, dest: null, poiCandidates: null };
   var lastSig = "";
   var basemapSig = "";
   var NAV_ZOOM_DEFAULT = 13;
@@ -234,6 +234,68 @@
       map.removeLayer(layers.dest);
       layers.dest = null;
     }
+    if (layers.poiCandidates) {
+      map.removeLayer(layers.poiCandidates);
+      layers.poiCandidates = null;
+    }
+  }
+
+  function renderAlongRouteCandidates(state, routePts) {
+    if (!map || !Array.isArray(routePts) || routePts.length < 6) return;
+    var sess = state && state.poiPickSession ? state.poiPickSession : null;
+    var choices = sess && Array.isArray(sess.choices) ? sess.choices : [];
+    if (!choices.length) return;
+
+    var group = L.layerGroup();
+    var n = Math.min(choices.length, 6);
+    var i;
+    for (i = 0; i < n; i++) {
+      var ratio = n === 1 ? 0.55 : 0.32 + (i / Math.max(1, n - 1)) * 0.48;
+      var idx = Math.max(1, Math.min(routePts.length - 2, Math.round((routePts.length - 1) * ratio)));
+      var pt = routePts[idx];
+      var choice = choices[i] || {};
+      var title = String(choice.title || "候选点 " + (i + 1));
+      var sub = String(choice.sub || "");
+
+      var marker = L.marker(pt, {
+        icon: L.divIcon({
+          className: "nav-lf-poi-icon",
+          html:
+            '<div class="nav-lf-poi-disc"><span class="nav-lf-poi-index">' +
+            (i + 1) +
+            "</span><span>☕</span></div>",
+          iconSize: [34, 34],
+          iconAnchor: [17, 17],
+        }),
+      })
+        .addTo(group)
+        .bindTooltip(i + 1 + " " + title, {
+          permanent: true,
+          direction: "right",
+          offset: [12, -1],
+          className: "nav-leaf-tooltip",
+        });
+
+      marker.on("click", (function (oneBased, t, s) {
+        return function () {
+          if (
+            window.Cockpit &&
+            typeof window.Cockpit.handleIntent === "function"
+          ) {
+            var voice = "好的，已将「" + t + "」加入途经点。";
+            window.Cockpit.handleIntent(
+              "nav_poi_candidate_pick",
+              { choice_index: oneBased },
+              voice + (s ? "（" + s + "）" : ""),
+              "第" + oneBased + "个"
+            );
+          }
+        };
+      })(i + 1, title, sub));
+    }
+
+    group.addTo(map);
+    layers.poiCandidates = group;
   }
 
   function initMapOnce() {
@@ -270,7 +332,17 @@
       "|" +
       (state.totalKm != null ? String(state.totalKm) : "") +
       "|" +
-      (state.waypoints || []).join(",");
+      (state.waypoints || []).join(",") +
+      "|" +
+      (
+        state.poiPickSession && Array.isArray(state.poiPickSession.choices)
+          ? state.poiPickSession.choices
+              .map(function (c) {
+                return String((c && c.title) || "");
+              })
+              .join(",")
+          : ""
+      );
     if (sig === lastSig && layers.route) {
       queueInvalidate();
       return;
@@ -302,12 +374,14 @@
       fillOpacity: 1,
     })
       .addTo(map)
-      .bindTooltip("阿杰所在，目的地 " + (state.dest || "公司"), {
+      .bindTooltip("目的地 " + (state.dest || "公司"), {
         permanent: true,
         direction: "top",
         offset: [0, -12],
         className: "nav-leaf-tooltip",
       });
+
+    renderAlongRouteCandidates(state, pts);
 
     try {
       var b = layers.route.getBounds();

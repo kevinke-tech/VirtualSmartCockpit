@@ -23,6 +23,10 @@
   var logEl = $("voxLog");
   var formEl = $("voxPromptForm");
   var inputEl = $("voxPromptInput");
+  var skillCountEl = $("voxSkillCount");
+  var skillListEl = $("voxSkillList");
+  var skillsRefreshBtn = $("voxSkillsRefreshBtn");
+  var skillsDeleteAllBtn = $("voxSkillsDeleteAllBtn");
   var quickBtns = card.querySelectorAll(".vox-quick-btn");
 
   var state = {
@@ -65,6 +69,230 @@
     row.appendChild(body);
     logEl.appendChild(row);
     logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function normalizeSkillItem(item) {
+    if (!item) return null;
+    if (typeof item === "string") {
+      return { name: item.trim(), description: "", isActive: false, kind: "" };
+    }
+    if (typeof item !== "object") return null;
+    var name = String(item.name || item.id || item.skill || item.title || "").trim();
+    if (!name) return null;
+    var bp = item.behavior_preview && typeof item.behavior_preview === "object" ? item.behavior_preview : null;
+    var desc = String(item.description || item.desc || "").trim();
+    if (!desc && bp) {
+      desc = String(bp.summary || bp.watch_for || "").trim();
+    }
+    var activeCount = Number(item.active_instances || 0);
+    return {
+      name: name,
+      description: desc,
+      isActive: !!item.is_active || activeCount > 0,
+      kind: String(item.kind || "").trim(),
+      required_args: Array.isArray(item.required_args) ? item.required_args : [],
+    };
+  }
+
+  function renderSkills(skills) {
+    var list = Array.isArray(skills) ? skills : [];
+    var items = list.map(normalizeSkillItem).filter(Boolean);
+    if (skillCountEl) skillCountEl.textContent = String(items.length);
+    if (!skillListEl) return;
+    skillListEl.innerHTML = "";
+    if (!items.length) {
+      skillListEl.innerHTML = '<li class="vox-skills-empty">还没有技能 —— 让 VOX 帮你建一个</li>';
+      return;
+    }
+    items.slice(0, 40).forEach(function (s) {
+      var li = document.createElement("li");
+      li.className = "vox-skill-row";
+
+      var main = document.createElement("div");
+      main.className = "vox-skill-main";
+      li.appendChild(main);
+
+      var body = document.createElement("div");
+      body.className = "vox-skill-body";
+      main.appendChild(body);
+
+      var nameEl = document.createElement("div");
+      nameEl.className = "vox-skill-name";
+      nameEl.textContent = s.name;
+      body.appendChild(nameEl);
+
+      var metaEl = document.createElement("div");
+      metaEl.className = "vox-skill-meta";
+      metaEl.textContent = (s.kind ? "[" + s.kind + "] " : "") + (s.description || "无描述");
+      body.appendChild(metaEl);
+
+      var stateEl = document.createElement("div");
+      stateEl.className = "vox-skill-state";
+      stateEl.textContent = s.isActive ? "● 激活中" : "○ 未激活";
+      body.appendChild(stateEl);
+
+      var controls = document.createElement("div");
+      controls.className = "vox-skill-controls";
+      main.appendChild(controls);
+
+      var toggle = document.createElement("label");
+      toggle.className = "vox-skill-toggle";
+      toggle.title = s.isActive ? "停用技能" : "激活技能";
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !!s.isActive;
+      cb.addEventListener("change", function () {
+        onSkillToggle(s, cb);
+      });
+      toggle.appendChild(cb);
+      toggle.appendChild(document.createTextNode("激活"));
+      controls.appendChild(toggle);
+
+      var delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "vox-skill-delete";
+      delBtn.textContent = "✕";
+      delBtn.title = "删除该技能";
+      delBtn.addEventListener("click", function () {
+        onSkillDelete(s);
+      });
+      controls.appendChild(delBtn);
+
+      skillListEl.appendChild(li);
+    });
+    if (items.length > 40) {
+      var more = document.createElement("li");
+      more.className = "vox-skills-empty";
+      more.textContent = "其余 " + (items.length - 40) + " 个技能请在 VOX 原页面查看";
+      skillListEl.appendChild(more);
+    }
+  }
+
+  async function fetchSkillsList() {
+    if (!state.backend || !skillListEl) return;
+    try {
+      var resp = await fetch(state.backend + "/skills", { method: "GET" });
+      if (!resp.ok) throw new Error("skills " + resp.status);
+      var data = await resp.json();
+      renderSkills(Array.isArray(data.skills) ? data.skills : []);
+    } catch (e) {
+      skillListEl.innerHTML =
+        '<li class="vox-skills-empty">技能列表加载失败: ' + String(e && e.message ? e.message : "unknown") + "</li>";
+    }
+  }
+
+  function coerceInputValue(raw) {
+    var v = String(raw || "").trim();
+    if (!v) return "";
+    if (v === "true") return true;
+    if (v === "false") return false;
+    if (!Number.isNaN(Number(v)) && /^-?\d+(\.\d+)?$/.test(v)) return Number(v);
+    if ((v.charAt(0) === "{" && v.charAt(v.length - 1) === "}") || (v.charAt(0) === "[" && v.charAt(v.length - 1) === "]")) {
+      try {
+        return JSON.parse(v);
+      } catch (_e) {
+        return v;
+      }
+    }
+    return v;
+  }
+
+  function collectRequiredArgs(skill) {
+    var required = Array.isArray(skill.required_args) ? skill.required_args : [];
+    var args = {};
+    var i;
+    for (i = 0; i < required.length; i++) {
+      var key = required[i];
+      var raw = window.prompt("[" + skill.name + "] 请输入参数 " + key, "");
+      if (raw === null) return null;
+      args[key] = coerceInputValue(raw);
+    }
+    return args;
+  }
+
+  async function onSkillToggle(skill, cb) {
+    var desired = !!cb.checked;
+    cb.disabled = true;
+    try {
+      var path = desired ? "activate" : "deactivate";
+      var payload = {};
+      if (desired && Array.isArray(skill.required_args) && skill.required_args.length) {
+        var picked = collectRequiredArgs(skill);
+        if (picked === null) {
+          cb.checked = !desired;
+          return;
+        }
+        payload.args = picked;
+      }
+      var resp = await fetch(
+        state.backend + "/skills/" + encodeURIComponent(skill.name) + "/" + path,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }
+      );
+      var data = await resp.json().catch(function () {
+        return {};
+      });
+      if (!resp.ok || !data.ok) {
+        appendLog("agent", "[" + skill.name + "] " + (desired ? "激活" : "停用") + "失败: " + (data.error || resp.status));
+        cb.checked = !desired;
+        return;
+      }
+    } catch (e) {
+      appendLog("agent", "[" + skill.name + "] " + (desired ? "激活" : "停用") + "请求失败: " + (e && e.message ? e.message : "unknown"));
+      cb.checked = !desired;
+    } finally {
+      cb.disabled = false;
+      fetchSkillsList();
+      refreshHealth();
+    }
+  }
+
+  async function onSkillDelete(skill) {
+    var ok = window.confirm('确定删除技能 "' + skill.name + '" 吗？');
+    if (!ok) return;
+    try {
+      var resp = await fetch(state.backend + "/skills/" + encodeURIComponent(skill.name), {
+        method: "DELETE",
+      });
+      var data = await resp.json().catch(function () {
+        return {};
+      });
+      if (!resp.ok || !data.ok) {
+        appendLog("agent", "[" + skill.name + "] 删除失败: " + (data.error || resp.status));
+      }
+    } catch (e) {
+      appendLog("agent", "[" + skill.name + "] 删除请求失败: " + (e && e.message ? e.message : "unknown"));
+    } finally {
+      fetchSkillsList();
+      refreshHealth();
+    }
+  }
+
+  async function onDeleteAllSkills() {
+    if (skillsDeleteAllBtn) skillsDeleteAllBtn.disabled = true;
+    try {
+      var resp = await fetch(state.backend + "/skills", { method: "GET" });
+      if (!resp.ok) throw new Error("skills " + resp.status);
+      var data = await resp.json();
+      var skills = Array.isArray(data.skills) ? data.skills : [];
+      if (!skills.length) return;
+      var ok = window.confirm("确定删除全部技能吗？将删除 " + skills.length + " 个技能。");
+      if (!ok) return;
+      var i;
+      for (i = 0; i < skills.length; i++) {
+        var s = skills[i];
+        await fetch(state.backend + "/skills/" + encodeURIComponent(s.name), { method: "DELETE" }).catch(function () {});
+      }
+    } catch (e) {
+      appendLog("agent", "[技能批量删除] 失败: " + (e && e.message ? e.message : "unknown"));
+    } finally {
+      if (skillsDeleteAllBtn) skillsDeleteAllBtn.disabled = false;
+      fetchSkillsList();
+      refreshHealth();
+    }
   }
 
   function normalizeBackend(raw) {
@@ -246,6 +474,10 @@
           else closeFramesStream();
           return;
         }
+        if (msg.type === "skills_changed") {
+          fetchSkillsList();
+          return;
+        }
         if (msg.type === "speak" && msg.text) {
           appendLog("agent", "🔔 " + String(msg.text));
           var say = getSpeakFn();
@@ -300,6 +532,8 @@
       var watchers = data.active_background || 0;
       var vision = data.vision_watchers || 0;
       var wsTag = state.wsConnected ? "WS连通" : "WS未连";
+      renderSkills(data.skills);
+      fetchSkillsList();
       setStatus(
         "ok",
         "在线 · 技能 " + skills + " · 后台 " + watchers + " · 视觉 " + vision + " · " + wsTag
@@ -312,6 +546,7 @@
       }
     } catch (_e) {
       state.wsConnected = false;
+      renderSkills([]);
       setStatus("idle", "未连接");
     }
   }
@@ -440,6 +675,16 @@
         runPlanPrompt(text);
       });
     }
+    if (skillsRefreshBtn) {
+      skillsRefreshBtn.addEventListener("click", function () {
+        fetchSkillsList();
+      });
+    }
+    if (skillsDeleteAllBtn) {
+      skillsDeleteAllBtn.addEventListener("click", function () {
+        onDeleteAllSkills();
+      });
+    }
     quickBtns.forEach(function (btn) {
       btn.addEventListener("click", function () {
         var prompt = btn.getAttribute("data-vox-prompt") || "";
@@ -460,6 +705,7 @@
     bindEvents();
     appendLog("agent", "VOX 面板就绪：可直接下达任务，未命中技能时会触发动态构造。");
     refreshHealth();
+    fetchSkillsList();
     openOutputSocket();
     setInterval(refreshHealth, 15000);
   }
@@ -469,5 +715,13 @@
   } else {
     init();
   }
+
+  window.CockpitVoxPanel = {
+    refreshSkills: function () {
+      fetchSkillsList();
+      refreshHealth();
+    },
+    refreshHealth: refreshHealth,
+  };
 })();
 

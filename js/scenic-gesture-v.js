@@ -57,7 +57,7 @@
       window.Cockpit.handleIntent(
         "scenic_take_photo",
         {},
-        "识别到剪刀手，准备倒计时拍照"
+        "识别到剪刀手，准备拍照"
       );
     } catch (e) {
       console.warn("[GestureV] handleIntent failed:", e);
@@ -67,6 +67,11 @@
   function loop() {
     rafId = 0;
     var now = performance.now();
+    if (window.__cockpitVoiceCapturing) {
+      streak = 0;
+      rafId = requestAnimationFrame(loop);
+      return;
+    }
     var v = document.getElementById("camPreview");
     if (!v || v.readyState < 2 || !v.videoWidth) {
       rafId = requestAnimationFrame(loop);

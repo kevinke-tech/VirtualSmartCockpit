@@ -49,6 +49,13 @@
   var speechConsecFrames = 0;
   var speechStartThreshold = SPEECH_THRESHOLD_MIN;
   var processing = false;
+  var captureSampleRate = TARGET_SAMPLE_RATE;
+
+  // 会议模式：麦克风流保持就绪，但只有按住空格/麦克风时才把音频送入 ASR。
+  // 扬声器中的远端人声与真人声学特征相同，单靠 AEC 无法可靠区分，按住说话是确定性门控。
+  var MEETING_MODE_STORAGE_KEY = "cockpit_voice_meeting_mode";
+  var meetingMode = localStorage.getItem(MEETING_MODE_STORAGE_KEY) !== "0";
+  var pushToTalkHeld = false;
 
   // Adaptive noise floor
   var noiseFloor = NOISE_FLOOR_INIT;
@@ -87,7 +94,7 @@
     var labels = {
       idle:       "\u{1F534} \u5F85\u547D\u4EE4",
       connecting: "\u{1F4E1} \u542F\u52A8\u4E2D\u2026",
-      ready:      "\u{1F7E2} \u8BF7\u8BF4\u8BDD",
+      ready:      meetingMode ? "\u{1F7E2} \u6309\u4F4F\u7A7A\u683C\u6216\u9EA6\u514B\u98CE\u8BF4\u8BDD" : "\u{1F7E2} \u8BF7\u8BF4\u8BDD",
       listening:  "\u{1F50A} \u8046\u542C\u4E2D\u2026",
       processing: "\u2699\uFE0F \u8BC6\u522B\u4E2D\u2026",
       success:    "\u2714 " + (message || ""),
@@ -108,7 +115,9 @@
         if (txt) txt.textContent = "\u8BED\u97F3\u68C0\u6D4B\u4E2D";
       } else {
         if (dot) dot.classList.remove("active");
-        if (txt) txt.textContent = status === "ready" ? "\u7B49\u5F85\u8BED\u97F3\u2026" : "";
+        if (txt) txt.textContent = status === "ready"
+          ? (meetingMode ? "\u4F1A\u8BAE\u6A21\u5F0F\uFF1A\u6309\u4F4F\u8BF4\u8BDD" : "\u7B49\u5F85\u8BED\u97F3\u2026")
+          : "";
       }
     }
 
@@ -147,44 +156,81 @@
     return true;
   }
 
+  /** 应交给 VOX 动态建技能/视觉监测的口语（即使座舱 /intent 判成 chat） */
+  function isVoxDynamicSkillRequest(text) {
+    var t = String(text || "").replace(/\s+/g, "").trim();
+    if (!t) return false;
+    if (/看到.+?(?:就|然后|便)(?:说|讲|告诉|提醒|播报|喊|报)/.test(t)) return true;
+    if (/当.+?(?:时|的时候|瞬间).+?(?:就|请|要|说|讲|告诉|提醒)/.test(t)) return true;
+    if (/(?:持续|一直|实时|时时|不断)(?:监测|监控|检测|看着|观察|留意)/.test(t)) return true;
+    if (/(?:画面|摄像头|镜头|视频里|镜头里).{0,16}(?:出现|看到|识别|检测|发现)/.test(t)) return true;
+    if (/(?:帮我|请|给).{0,10}(?:建|创建|生成|写|做).{0,8}(?:技能|能力|功能|助手)/.test(t)) return true;
+    if (/(?:有人|有人物|有人脸).{0,12}(?:挥手|举手|打电话)/.test(t)) return true;
+    if (/(?:看到|发现|识别|检测).{0,20}(?:挥手|举手|打电话|矿泉水|水瓶)/.test(t)) return true;
+    return false;
+  }
+
+  async function invokeVoxPlan(transcript) {
+    var plan = await callVoxPlanFallback(transcript);
+    var speak = (plan && plan.speak ? String(plan.speak) : "").trim();
+    var render = (plan && plan.render ? String(plan.render) : "").trim();
+    var kind = (plan && plan.kind ? String(plan.kind) : "unknown").trim();
+    console.log("[Voice] VOX plan:", kind, render || speak || "(empty)");
+    if (speak) {
+      if (window.CockpitTTS && window.CockpitTTS.speak)
+        window.CockpitTTS.speak(speak, { interrupt: true });
+      else if (typeof window.speakTTS === "function")
+        window.speakTTS(speak, { interrupt: true });
+    }
+    if (window.CockpitVoxPanel && typeof window.CockpitVoxPanel.refreshSkills === "function")
+      window.CockpitVoxPanel.refreshSkills();
+    updateVUI("success", speak || render || ("VOX: " + kind));
+    setTimeout(function () { updateVUI("ready"); }, 3500);
+    return true;
+  }
+
   async function callVoxPlanFallback(transcript) {
     var vox = getVoxBackend();
-    var resp = await fetch(vox + "/plan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        transcript: transcript,
-        image_b64: null,
-        context: {
-          source: "virtual-smart-cockpit-voice",
-          cockpit: getPageContext(),
-        },
-      }),
-    });
-    if (!resp.ok) throw new Error("VOX /plan " + resp.status);
-    return resp.json();
+    var controller = new AbortController();
+    var timer = setTimeout(function () {
+      controller.abort();
+    }, 120000);
+    try {
+      var resp = await fetch(vox + "/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transcript: transcript,
+          image_b64: null,
+          context: {
+            source: "virtual-smart-cockpit-voice",
+            cockpit: getPageContext(),
+          },
+        }),
+        signal: controller.signal,
+      });
+      if (!resp.ok) throw new Error("VOX /plan " + resp.status);
+      return resp.json();
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async function tryVoxFallbackForIntent(text, intentData) {
     var action = intentData && intentData.action ? String(intentData.action).trim() : "";
+    var voxSkill = isVoxDynamicSkillRequest(text);
     if (action === "none") return false;
+    if (action === "chat" && !voxSkill) return false;
+    if (
+      action === "unknown" &&
+      (intentData.response || "").trim() &&
+      !voxSkill
+    )
+      return false;
     if (actionCanReuseCockpitUi(action)) return false;
     if (!text) return false;
     try {
-      var plan = await callVoxPlanFallback(text);
-      var speak = (plan && plan.speak ? String(plan.speak) : "").trim();
-      var render = (plan && plan.render ? String(plan.render) : "").trim();
-      var kind = (plan && plan.kind ? String(plan.kind) : "unknown").trim();
-      console.log("[Voice] VOX fallback:", kind, render || speak || "(empty)");
-      if (speak) {
-        if (window.CockpitTTS && window.CockpitTTS.speak)
-          window.CockpitTTS.speak(speak, { interrupt: true });
-        else if (typeof window.speakTTS === "function")
-          window.speakTTS(speak, { interrupt: true });
-      }
-      updateVUI("success", speak || render || ("VOX: " + kind));
-      setTimeout(function () { updateVUI("ready"); }, 3500);
-      return true;
+      return await invokeVoxPlan(text);
     } catch (e) {
       console.warn("[Voice] VOX fallback failed:", e.message);
       return false;
@@ -214,6 +260,29 @@
     var ratio = fromRate / toRate;
     var outLen = Math.round(input.length / ratio);
     var output = new Float32Array(outLen);
+
+    // 麦克风通常为 48 kHz。降到 16 kHz 时不能直接每隔 3 点抽一个样本，
+    // 否则 8 kHz 以上的噪声会折叠进人声频段。用面积平均作为轻量低通。
+    if (ratio > 1) {
+      for (var oi = 0; oi < outLen; oi++) {
+        var start = oi * ratio;
+        var end = Math.min(input.length, (oi + 1) * ratio);
+        var first = Math.floor(start);
+        var last = Math.ceil(end);
+        var sum = 0;
+        var weightSum = 0;
+        for (var si = first; si < last; si++) {
+          var weight = Math.max(0, Math.min(end, si + 1) - Math.max(start, si));
+          if (si < input.length && weight > 0) {
+            sum += input[si] * weight;
+            weightSum += weight;
+          }
+        }
+        output[oi] = weightSum ? sum / weightSum : 0;
+      }
+      return output;
+    }
+
     for (var i = 0; i < outLen; i++) {
       var srcIdx = i * ratio;
       var idx0 = Math.floor(srcIdx);
@@ -420,6 +489,18 @@
       console.log("[Voice] ASR:", text);
       updateVUI("processing", text);
 
+      if (isVoxDynamicSkillRequest(text)) {
+        try {
+          var voxFirst = await invokeVoxPlan(text);
+          if (voxFirst) {
+            processing = false;
+            return;
+          }
+        } catch (e) {
+          console.warn("[Voice] VOX skill request failed, fallback to cockpit:", e.message);
+        }
+      }
+
       var intentStart = Date.now();
       var intentResp = await fetch(BACKEND + "/intent", {
         method: "POST",
@@ -428,7 +509,37 @@
       });
       var intentData = await intentResp.json();
       var intentMs = Date.now() - intentStart;
-      var tier = intentData.match === "fast" ? "FAST" : "LLM";
+      if (
+        window.Cockpit &&
+        typeof window.Cockpit.resolveCoffeeVoiceUtterance === "function"
+      ) {
+        var ctx = getPageContext();
+        if (ctx && ctx.overlay_coffee) {
+          var coffeeRescue = window.Cockpit.resolveCoffeeVoiceUtterance(text);
+          if (coffeeRescue) {
+            var cur = intentData && intentData.action ? String(intentData.action) : "";
+            var rescueAct = coffeeRescue.action;
+            var needRescue =
+              !cur ||
+              cur === "chat" ||
+              cur === "unknown" ||
+              cur === "none" ||
+              (rescueAct.indexOf("coffee_") === 0 && cur !== rescueAct);
+            if (needRescue) {
+              console.log("[Voice] Coffee overlay rescue:", rescueAct, "was:", cur);
+              intentData = Object.assign({}, intentData, coffeeRescue);
+            }
+          }
+        }
+      }
+      var tier = "LLM";
+      if (intentData.match === "fast") tier = "FAST";
+      else if (
+        intentData.match === "local_embed" ||
+        intentData.match === "local_fuzzy" ||
+        intentData.match === "coffee_local"
+      )
+        tier = "LOCAL";
       console.log("[Voice] Intent (" + tier + ", " + intentMs + "ms):", intentData.action, intentData.response);
       var handledByVox = await tryVoxFallbackForIntent(text, intentData);
       if (handledByVox) {
@@ -457,14 +568,19 @@
     mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
+        sampleRate: { ideal: TARGET_SAMPLE_RATE },
+        sampleSize: { ideal: 16 },
         echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
+        // Windows/Chromium 的 AGC + 强降噪有时会把近讲中文削成断续音节。
+        // 会议模式已有按键门控，只保留回声消除，尽量把原始人声交给 ASR。
+        noiseSuppression: false,
+        autoGainControl: false,
       },
     });
 
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     var nativeSR = audioCtx.sampleRate;
+    captureSampleRate = nativeSR;
     console.log("[Voice] Native sample rate:", nativeSR);
 
     var source = audioCtx.createMediaStreamSource(mediaStream);
@@ -481,6 +597,7 @@
 
     scriptNode.onaudioprocess = function (e) {
       if (!isActive) return;
+      if (meetingMode && !pushToTalkHeld) return;
 
       var input = e.inputBuffer.getChannelData(0);
       var rms = 0;
@@ -543,6 +660,7 @@
             return;
           }
           isSpeaking = true;
+          window.__cockpitVoiceCapturing = true;
           speechStart = now;
           speechVoicedFrames = 0;
           speechStartThreshold = startThreshold;
@@ -559,8 +677,13 @@
         speechBuffer.push(new Float32Array(input));
         var speechDuration = now - speechStart;
 
-        if (now - lastSpeechTime > SILENCE_DURATION_MS && speechDuration > MIN_SPEECH_DURATION_MS) {
+        if (
+          (!meetingMode || !pushToTalkHeld) &&
+          now - lastSpeechTime > SILENCE_DURATION_MS &&
+          speechDuration > MIN_SPEECH_DURATION_MS
+        ) {
           isSpeaking = false;
+          window.__cockpitVoiceCapturing = false;
           var merged = mergeBuffers(speechBuffer);
           var voicedFrames = speechVoicedFrames;
           var isValidSpeech = voicedFrames >= MIN_VOICED_FRAMES;
@@ -575,6 +698,7 @@
           }
         } else if (speechDuration > MAX_SPEECH_DURATION_MS) {
           isSpeaking = false;
+          window.__cockpitVoiceCapturing = false;
           var merged2 = mergeBuffers(speechBuffer);
           var isValidSpeech2 = speechVoicedFrames >= MIN_VOICED_FRAMES;
           speechBuffer = [];
@@ -606,6 +730,7 @@
     speechVoicedFrames = 0;
     speechConsecFrames = 0;
     isSpeaking = false;
+    pushToTalkHeld = false;
     var wasStreamingHtmlTts = !!currentTTSAudio;
     stopPlaybackHardwareOnly();
     if (
@@ -615,6 +740,57 @@
     ) {
       window.CockpitTTS.notifyDeviceStoppedExternally();
     }
+  }
+
+  function isTypingTarget(target) {
+    if (!target) return false;
+    var tag = String(target.tagName || "").toLowerCase();
+    if (tag === "textarea" || tag === "select" || target.isContentEditable) return true;
+    if (tag !== "input") return false;
+    var type = String(target.type || "text").toLowerCase();
+    return ["text", "search", "email", "number", "password", "tel", "url"].indexOf(type) >= 0;
+  }
+
+  function beginPushToTalk() {
+    if (!isActive || processing || pushToTalkHeld) return;
+    pushToTalkHeld = true;
+    window.__cockpitVoiceCapturing = true;
+    stopTTSForBargeIn();
+    speechBuffer = [];
+    preBuffer = [];
+    speechVoicedFrames = 0;
+    speechConsecFrames = START_CONSEC_FRAMES;
+    isSpeaking = true;
+    speechStart = Date.now();
+    lastSpeechTime = speechStart;
+    updateVUI("listening");
+  }
+
+  function finishPushToTalk() {
+    if (!pushToTalkHeld) return;
+    pushToTalkHeld = false;
+    window.__cockpitVoiceCapturing = false;
+    var duration = Date.now() - speechStart;
+    var merged = speechBuffer.length ? mergeBuffers(speechBuffer) : null;
+    // 按住说话本身就是明确的 VAD；不再因能量阈值丢弃短词或小声指令。
+    var valid = duration >= 180 && merged && merged.length > 0;
+    speechBuffer = [];
+    preBuffer = [];
+    speechVoicedFrames = 0;
+    speechConsecFrames = 0;
+    isSpeaking = false;
+    if (valid) processAudio(merged, captureSampleRate);
+    else updateVUI("ready");
+  }
+
+  function setMeetingMode(enabled) {
+    meetingMode = !!enabled;
+    localStorage.setItem(MEETING_MODE_STORAGE_KEY, meetingMode ? "1" : "0");
+    if (!meetingMode) finishPushToTalk();
+    var toggleEl = $("vuiMeetingMode");
+    if (toggleEl) toggleEl.checked = meetingMode;
+    if (isActive && !processing) updateVUI("ready");
+    console.log("[Voice] Meeting mode:", meetingMode ? "ON (push-to-talk)" : "OFF (always listening)");
   }
 
   // ── public API ──────────────────────────────────────────────────────
@@ -634,6 +810,7 @@
 
   function stop() {
     isActive = false;
+    window.__cockpitVoiceCapturing = false;
     stopAudioCapture();
     updateVUI("idle");
   }
@@ -680,17 +857,61 @@
 
   // ── init ────────────────────────────────────────────────────────────
   function init() {
-    console.log("[Voice] v5 — adaptive VAD + video/TTS echo suppression");
+    console.log("[Voice] v6 — meeting push-to-talk + adaptive VAD + echo suppression");
     syncTtsGlobal();
 
     var micCore = $("vuiMicCore");
     if (micCore) {
       micCore.style.cursor = "pointer";
-      micCore.addEventListener("click", function (e) { e.stopPropagation(); toggle(); });
+      micCore.addEventListener("pointerdown", function (e) {
+        e.stopPropagation();
+        if (meetingMode) {
+          e.preventDefault();
+          micCore.setPointerCapture && micCore.setPointerCapture(e.pointerId);
+          beginPushToTalk();
+        }
+      });
+      micCore.addEventListener("pointerup", function (e) {
+        e.stopPropagation();
+        if (meetingMode) {
+          e.preventDefault();
+          finishPushToTalk();
+        }
+      });
+      micCore.addEventListener("pointercancel", finishPushToTalk);
+      micCore.addEventListener("click", function (e) {
+        e.stopPropagation();
+        if (!meetingMode) toggle();
+      });
     }
 
     var container = $("vuiContainer");
-    if (container) { container.addEventListener("click", function () { toggle(); }); }
+    if (container) {
+      container.addEventListener("click", function (e) {
+        if (!meetingMode && !e.target.closest(".vui-meeting-toggle")) toggle();
+      });
+    }
+
+    var meetingToggle = $("vuiMeetingMode");
+    if (meetingToggle) {
+      meetingToggle.checked = meetingMode;
+      meetingToggle.addEventListener("click", function (e) { e.stopPropagation(); });
+      meetingToggle.addEventListener("change", function () {
+        setMeetingMode(meetingToggle.checked);
+      });
+    }
+
+    document.addEventListener("keydown", function (e) {
+      if (e.code !== "Space" || e.repeat || isTypingTarget(e.target)) return;
+      e.preventDefault();
+      beginPushToTalk();
+    });
+    document.addEventListener("keyup", function (e) {
+      if (e.code !== "Space" || isTypingTarget(e.target)) return;
+      e.preventDefault();
+      finishPushToTalk();
+    });
+    window.addEventListener("blur", finishPushToTalk);
 
     watchCockpitMediaEcho();
 
@@ -718,5 +939,11 @@
     setTimeout(init, 500);
   }
 
-  window.VoiceController = { start: start, stop: stop, toggle: toggle, sendContextUpdate: function () {} };
+  window.VoiceController = {
+    start: start,
+    stop: stop,
+    toggle: toggle,
+    setMeetingMode: setMeetingMode,
+    sendContextUpdate: function () {},
+  };
 })();

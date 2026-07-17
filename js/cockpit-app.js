@@ -414,6 +414,73 @@
     return bestSku || null;
   }
 
+  var COFFEE_CHECKOUT_RE =
+    /就这些|没有了|不要了|不用了|去结账|去付款|结账|确认付款|可以付款|下单|扫码|买好了|够了|可以了|没别的|没有别的|不用别的|不要别的/;
+  var COFFEE_CLOSE_RE = /关闭咖啡|退出咖啡|退出点单|关了点单|收起咖啡|关掉咖啡/;
+
+  function extractCoffeeQtyFromSpeech(text) {
+    var t = String(text || "").replace(/\s+/g, "");
+    var m = t.match(/(\d+)杯/);
+    if (m) return Math.min(9, Math.max(1, parseInt(m[1], 10)));
+    if (/两杯|来两|两份/.test(t)) return 2;
+    if (/三杯/.test(t)) return 3;
+    return 1;
+  }
+
+  /**
+   * 咖啡页打开时的本地语音兜底（LLM 未命中或误判时仍可走 fast 级响应）。
+   */
+  function resolveCoffeeVoiceUtterance(text) {
+    if (!state.panels.coffee) return null;
+    var t = String(text || "").replace(/\s+/g, "").trim();
+    if (!t) return null;
+
+    if (COFFEE_CLOSE_RE.test(t) || t === "关闭" || t === "退出") {
+      return { action: "coffee_close", params: {}, response: "", match: "coffee_local" };
+    }
+    if (COFFEE_CHECKOUT_RE.test(t)) {
+      return {
+        action: "coffee_confirm_pay",
+        params: {},
+        response: "",
+        match: "coffee_local",
+      };
+    }
+    if (/再来|再加|还要/.test(t) && state.coffee.cart.length) {
+      var lastLn = state.coffee.cart[state.coffee.cart.length - 1];
+      if (lastLn && lastLn.sku) {
+        return {
+          action: "coffee_add_item",
+          params: {
+            sku: lastLn.sku,
+            qty: extractCoffeeQtyFromSpeech(t),
+          },
+          response: "",
+          match: "coffee_local",
+        };
+      }
+    }
+    var skuHit = resolveCoffeeSkuFromSpeech(t);
+    if (skuHit) {
+      return {
+        action: "coffee_add_item",
+        params: { sku: skuHit, qty: extractCoffeeQtyFromSpeech(t) },
+        response: "",
+        match: "coffee_local",
+      };
+    }
+    if (/有什么|菜单|喝什么|推荐|点什么/.test(t)) {
+      return {
+        action: "coffee_open",
+        params: {},
+        response:
+          "您可以看屏幕上的菜单，也可以直接说名字，比如" + coffeeMenuSpeechHint(5) + "。",
+        match: "coffee_local",
+      };
+    }
+    return null;
+  }
+
   /** @deprecated 仅保留给旧话术；新路应使用 resolveCoffeeSkuFromSpeech */
   function guessSkuFromName(name) {
     var sku = resolveCoffeeSkuFromSpeech(name);
@@ -627,13 +694,19 @@
     return document.getElementById(id);
   }
 
-  function speakOrToast(msg) {
+  function speakOrToast(msg, opts) {
     var el = $("toastLine");
     if (el) el.textContent = msg;
     /** 一车一张嘴：先入队播报；与其它模块互不抢声道 */
+    opts = opts || {};
     if (window.CockpitTTS && typeof window.CockpitTTS.speak === "function")
-      window.CockpitTTS.speak(msg, {});
-    else if (typeof window.speakTTS === "function") window.speakTTS(msg, {});
+      window.CockpitTTS.speak(msg, opts);
+    else if (typeof window.speakTTS === "function") window.speakTTS(msg, opts);
+  }
+
+  function abortCockpitTts() {
+    if (window.CockpitTTS && typeof window.CockpitTTS.abortAll === "function")
+      window.CockpitTTS.abortAll();
   }
 
   function clearOverlayTimer(name) {
@@ -795,101 +868,153 @@
     state.poiPickSession = null;
   }
 
-  function buildFakeAlongRouteChoices(queryRaw) {
-    var q = (queryRaw || "").trim();
-    if (q.indexOf("加油") !== -1 || q.indexOf("油站") !== -1) {
-      return [
-        {
-          title: "壳牌 · 滨河大道合营站（演示）",
-          sub: "偏离主路约 1.1 km · 顺路推荐指数高",
-        },
-        {
-          title: "中石油 · 福田高铁枢纽（演示）",
-          sub: "约 2.3 km · 便利店营业中",
-        },
-        {
-          title: "民营 · 快充能量廊道（沿江匝道，演示）",
-          sub: "卫生间开放 · 与充电位同区",
-        },
-      ];
-    }
-    if (
-      q.indexOf("充电") !== -1 ||
-      q.indexOf("快充") !== -1 ||
-      q.indexOf("充电桩") !== -1
-    ) {
-      return [
-        {
-          title: "小桔超充 · 南山科技园 B 区（演示）",
-          sub: "约偏离 800 m · 占位费低",
-        },
-        {
-          title: "特斯拉目的地桩 · MixC（演示）",
-          sub: "下地库后步行约 5 分钟",
-        },
-        {
-          title: "国家电网 · 蛇口港（演示）",
-          sub: "大功率 · 错峰优惠",
-        },
-      ];
-    }
-    if (q.indexOf("服务区") !== -1) {
-      return [
-        {
-          title: "广深沿江 · 国际会展中心服务区（演示）",
-          sub: "餐饮 · 加油 · 充电一体",
-        },
-        {
-          title: "广深沿江 · 福永服务区（演示）",
-          sub: "卫生间改造完成",
-        },
-        {
-          title: "南光高速 · 李松蓢小型停靠（演示）",
-          sub: "简餐 · 咖啡",
-        },
-      ];
-    }
-    if (
-      q.indexOf("卫生间") !== -1 ||
-      q.indexOf("厕所") !== -1 ||
-      q.indexOf("洗手间") !== -1
-    ) {
-      return [
-        {
-          title: "蛇口邮轮中心公厕（演示）",
-          sub: "距主路出口约 400 m",
-        },
-        {
-          title: "深圳湾口岸联检楼（演示）",
-          sub: "室内通道可用",
-        },
-        {
-          title: "滨海休闲带驿站（演示）",
-          sub: "夜间照明好",
-        },
-      ];
-    }
-    if (q.indexOf("商场") !== -1 || q.indexOf("购物") !== -1) {
-      return [
-        {
-          title: "深圳湾万象城（演示）",
-          sub: "与左侧消息接人示例地点一致",
-        },
-        {
-          title: "卓悦中心（演示）",
-          sub: "餐饮选择多",
-        },
-        {
-          title: "海上世界（演示）",
-          sub: "海景步行区",
-        },
-      ];
-    }
-    return [
-      { title: "沿途兴趣点 A（「" + q + "」演示）", sub: "自动推荐 1" },
-      { title: "沿途兴趣点 B（「" + q + "」演示）", sub: "自动推荐 2" },
-      { title: "沿途兴趣点 C（「" + q + "」演示）", sub: "自动推荐 3" },
+  var POI_QUERY_JUNK_RE = /^(沿途兴趣点|兴趣点|沿途poi|沿途 POI|poi)$/i;
+
+  function extractAlongRoutePoiCategoryFromSpeech(raw) {
+    var t = String(raw || "").replace(/\s+/g, "").trim();
+    if (!t) return "";
+    var patterns = [
+      /(?:沿途|沿路|顺路|路上|顺便|顺带|路边|前边|前方|行程中)(?:帮我|帮忙|给我|能否|可以)?(?:搜索|搜(?:索|一下|下)?|找(?:一下|下)?|查(?:询|找|看)?(?:一下|下)?)(.+)$/,
+      /(?:沿途|沿路|顺路|路上|顺便|顺带)(?:的|有|有没有|附近|能不能|能否)?(.{2,14})$/
     ];
+    var i;
+    for (i = 0; i < patterns.length; i++) {
+      var m = t.match(patterns[i]);
+      if (!m || !m[1]) continue;
+      var cat = String(m[1]).replace(/^(有哪些|有什么|哪儿有|哪里有|能不能|能否)/, "").replace(/[吧呢啊嘛的了一下]+$/g, "").trim();
+      cat = normalizeAlongRoutePoiQuery(cat);
+      if (cat && !POI_QUERY_JUNK_RE.test(cat)) return cat;
+    }
+    var tail = t.match(/(?:搜|找|查)(?:索|一下|下)?(.+)$/);
+    if (tail && tail[1]) {
+      cat = normalizeAlongRoutePoiQuery(String(tail[1]).trim());
+      if (cat && !POI_QUERY_JUNK_RE.test(cat)) return cat;
+    }
+    return "";
+  }
+
+  function resolveAlongRoutePoiQuery(queryRaw, utteranceRaw) {
+    var q = normalizeAlongRoutePoiQuery(queryRaw);
+    if (q && !POI_QUERY_JUNK_RE.test(q)) return q;
+    var fromSpeech = extractAlongRoutePoiCategoryFromSpeech(utteranceRaw);
+    if (fromSpeech) return fromSpeech;
+    if (q && !POI_QUERY_JUNK_RE.test(q)) return q;
+    return "兴趣点";
+  }
+
+  function normalizeAlongRoutePoiQuery(queryRaw) {
+    var q = (queryRaw || "").trim();
+    if (!q) return "";
+    if (/咖啡|星巴克|瑞幸|cafe/i.test(q)) return "咖啡店";
+    if (/加油|油站|中石化|中石油|壳牌|bp/i.test(q)) return "加油站";
+    if (/充电|快充|充电桩/.test(q)) return "充电站";
+    if (/服务区/.test(q)) return "服务区";
+    if (/卫生间|厕所|洗手间|公厕/.test(q)) return "公共卫生间";
+    if (/商场|购物|mall/i.test(q)) return "商场";
+    if (/药店|药房/.test(q)) return "药店";
+    if (/银行|atm|取款/i.test(q)) return "银行";
+    if (/超市|便利店/.test(q)) return "超市";
+    if (/餐厅|饭店|吃饭|餐馆|美食/.test(q)) return "餐厅";
+    if (/书店|图书|书城|书屋|新华书店/.test(q)) return "书店";
+    q = q.replace(/^沿途|^顺路|^沿路/, "").trim();
+    if (POI_QUERY_JUNK_RE.test(q)) return "";
+    return q || "";
+  }
+
+  function simpleStreetCategoryChoices(category) {
+    var cat = (category || "").trim();
+    if (!cat || POI_QUERY_JUNK_RE.test(cat)) return null;
+    var streets = ["宝岗路", "天津路", "天桥路"];
+    return streets.map(function (street, i) {
+      var title = street + cat;
+      if (!/(店|站|区|馆|房|行|中心|公司|厅|场|院|市|点)$/.test(title)) {
+        title += "店";
+      }
+      return {
+        title: title,
+        sub: "距主路约 " + (0.6 + i * 0.5).toFixed(1) + " km",
+      };
+    });
+  }
+
+  function genericStreetPoiChoices(category, brandHints) {
+    var streets = ["宝岗路", "天津路", "天桥路"];
+    var hints = brandHints || ["", "", ""];
+    var i;
+    var out = [];
+    for (i = 0; i < 3; i++) {
+      var brand = hints[i] || category;
+      var title = streets[i] + brand;
+      if (!/(店|站|区|馆|房|行|中心|公司|厅)$/.test(title)) {
+        title += "店";
+      }
+      out.push({
+        title: title,
+        sub: "距主路约 " + (0.6 + i * 0.5).toFixed(1) + " km",
+      });
+    }
+    return out;
+  }
+
+  function buildFakeAlongRouteChoices(queryRaw) {
+    var q = normalizeAlongRoutePoiQuery(queryRaw);
+    if (/咖啡|星巴克|瑞幸|cafe/i.test(q)) {
+      return [
+        { title: "小红咖啡店", sub: "距路线约 800 m · 评价 4.6" },
+        { title: "瑞芯咖啡店", sub: "距路线约 1.2 km · 可停车" },
+        { title: "星巴克咖啡店", sub: "距路线约 1.5 km · 营业中" },
+      ];
+    }
+    if (/加油|油站|中石化|中石油|壳牌|bp/i.test(q)) {
+      return [
+        { title: "宝岗路中石化加油站", sub: "偏离主路约 600 m" },
+        { title: "天津路中石油加油站", sub: "约 1.1 km · 便利店" },
+        { title: "天桥路BP加油站", sub: "约 1.8 km · 顺路推荐" },
+      ];
+    }
+    if (/充电|快充|充电桩/.test(q)) {
+      return [
+        { title: "宝岗路小桔超充站", sub: "约偏离 800 m · 占位费低" },
+        { title: "天津路国家电网快充站", sub: "大功率 · 错峰优惠" },
+        { title: "天桥路特斯拉目的地充电站", sub: "下地库后步行约 5 分钟" },
+      ];
+    }
+    if (/服务区/.test(q)) {
+      return [
+        { title: "广深沿江国际会展中心服务区", sub: "餐饮 · 加油 · 充电一体" },
+        { title: "广深沿江福永服务区", sub: "卫生间改造完成" },
+        { title: "南光高速李松蓢服务区", sub: "简餐 · 咖啡" },
+      ];
+    }
+    if (/卫生间|厕所|洗手间|公厕/.test(q)) {
+      return [
+        { title: "宝岗路公共卫生间", sub: "距主路出口约 400 m" },
+        { title: "天津路口岸联检楼卫生间", sub: "室内通道可用" },
+        { title: "天桥路滨海驿站卫生间", sub: "夜间照明好" },
+      ];
+    }
+    if (/商场|购物|mall/i.test(q)) {
+      return [
+        { title: "宝岗路万象城", sub: "餐饮选择多" },
+        { title: "天津路卓悦中心", sub: "停车方便" },
+        { title: "天桥路海上世界", sub: "海景步行区" },
+      ];
+    }
+    if (/药店|药房/.test(q)) {
+      return genericStreetPoiChoices("健民大药房", ["健民大药房", "海王星辰", "同仁堂"]);
+    }
+    if (/银行|atm|取款/i.test(q)) {
+      return genericStreetPoiChoices("银行", ["工商银行", "建设银行", "招商银行"]);
+    }
+    if (/超市|便利店/.test(q)) {
+      return genericStreetPoiChoices("便利店", ["全家便利店", "7-Eleven", "美宜佳"]);
+    }
+    if (/餐厅|饭店|吃饭|餐馆|美食/.test(q)) {
+      return genericStreetPoiChoices("餐厅", ["粤式茶餐厅", "川味小馆", "本帮菜馆"]);
+    }
+    var simple = simpleStreetCategoryChoices(q);
+    if (simple) return simple;
+    return genericStreetPoiChoices(q, [q, q, q]);
   }
 
   function poiPickAnnouncementLine(query, choices) {
@@ -897,21 +1022,14 @@
     var i;
     for (i = 0; i < choices.length; i++) {
       var c = choices[i];
-      parts.push(
-        "第" +
-          (i + 1) +
-          "个，" +
-          c.title +
-          "。" +
-          (c.sub ? c.sub + "。" : "")
-      );
+      parts.push("第" + (i + 1) + "个，" + c.title + "。");
     }
     return (
       "沿途为您找到 " +
       choices.length +
       " 处「" +
       query +
-      "」备选，请听完后用语音说第几个；约十四秒内无应答将默认第一项。" +
+      "」备选，请说第几个；约十四秒内无应答将默认第一项。" +
       parts.join("")
     );
   }
@@ -950,16 +1068,14 @@
     }
   }
 
-  function startAlongRoutePoiFlow(query, serverReply) {
+  function startAlongRoutePoiFlow(query, serverReply, utteranceRaw) {
     clearPoiPickSession();
+    abortCockpitTts();
     state.panels.nav = true;
-    var qDisp = (query || "").trim() || "沿途 POI";
+    var qDisp = resolveAlongRoutePoiQuery(query, utteranceRaw) || "兴趣点";
     state.navSearch = qDisp;
     var choices = buildFakeAlongRouteChoices(qDisp);
     var speech = poiPickAnnouncementLine(qDisp, choices);
-    if (serverReply && String(serverReply).trim()) {
-      speech = String(serverReply).trim() + " " + speech;
-    }
     state.poiPickSession = {
       query: qDisp,
       choices: choices,
@@ -969,7 +1085,7 @@
     };
     syncChrome();
     renderPoiPickSheet();
-    speakOrToast(speech);
+    speakOrToast(speech, { interrupt: true });
   }
 
   function finalizePoiChoice(oneBased, fromTimeout) {
@@ -986,16 +1102,18 @@
     var picked = sess.choices[i - 1];
     var title = picked && picked.title ? picked.title : "途经点";
     clearPoiPickSession();
+    abortCockpitTts();
     state.waypoints.push(title);
     state.remainKm += 5;
     renderPoiPickSheet();
     syncNavNumbers();
     if (fromTimeout) {
       speakOrToast(
-        "未听到选择，已默认第一项「" + title + "」，已加入途经点。"
+        "未听到选择，已默认第一项「" + title + "」，已加入途经点。",
+        { interrupt: true }
       );
     } else {
-      speakOrToast("好的，已将「" + title + "」加入途经点。");
+      speakOrToast("好的，已将「" + title + "」加入途经点。", { interrupt: true });
     }
   }
 
@@ -1371,6 +1489,23 @@
       speakOrToast(msg || reply);
     }
 
+    function extractDestinationFromNavSpeech(text) {
+      var t = String(text || "").trim();
+      if (!t) return "";
+      var compact = t.replace(/\s+/g, "");
+      var m =
+        compact.match(/(?:导航到|导航去|去往|前往|开到|开去|目的地(?:改成|设为|设置为|是|到)?)(.+)$/) ||
+        compact.match(/(?:我们去|就去|改成去)(.+)$/);
+      if (!m || !m[1]) return "";
+      var d = String(m[1] || "");
+      d = d.replace(/^(?:一下|一趟|一个|去|到|往)+/, "");
+      d = d.replace(/(?:吧|好吗|可以吗|行吗|呢|呀|啊)+$/, "");
+      d = d.trim();
+      if (!d) return "";
+      if (/(顺便|顺路|沿路|沿途|途经|加一站|绕一下)/.test(d)) return "";
+      return d;
+    }
+
     switch (action) {
       /** lane 索引与 three 场景一致：0=最左侧车道、1=中间、2=最右侧（见 road-three laneIndexToX） */
       case "drive_overtake_left":
@@ -1424,11 +1559,20 @@
         confirm(reply);
         break;
       case "nav_open":
+        // 后端偶发只返回 nav_open 时，仍根据原语句提取目的地，防止停在“公司”。
+        if (!params.destination && utteranceVo) {
+          var guessedDest = extractDestinationFromNavSpeech(utteranceVo);
+          if (guessedDest) params.destination = guessedDest;
+        }
+        if (params.destination) {
+          state.dest = String(params.destination).trim() || state.dest;
+          syncNavNumbers();
+        }
         state.panels.nav = true;
         confirm(reply);
         break;
       case "nav_set_destination":
-        state.dest = params.destination || state.dest;
+        state.dest = (params.destination != null ? String(params.destination).trim() : "") || state.dest;
         state.panels.nav = true;
         syncNavNumbers();
         confirm(reply);
@@ -1439,7 +1583,7 @@
         confirm(reply);
         break;
       case "nav_along_route_poi_start":
-        startAlongRoutePoiFlow(params.query, reply);
+        startAlongRoutePoiFlow(params.query, reply, utteranceVo);
         break;
       case "nav_poi_candidate_pick": {
         if (!state.poiPickSession) {
@@ -1455,7 +1599,7 @@
         clearPoiPickSession();
         renderPoiPickSheet();
         syncChrome();
-        confirm(reply || "好的，已取消本次沿路选点。");
+        speakOrToast(reply || "好的，已取消本次沿路选点。", { interrupt: true });
         break;
       case "nav_add_waypoint":
         state.waypoints.push(params.name || "途经点");
@@ -1480,7 +1624,9 @@
         confirm(reply);
         break;
       case "msg_read_last": {
-        var readout = reply && reply.trim() ? reply : formatInboxSpeech();
+        // action 语义是“真正朗读收件箱”；后端 response 往往只是
+        // “好的，我来读”，不能用它覆盖实际消息正文。
+        var readout = formatInboxSpeech();
         confirm(readout);
         break;
       }
@@ -1869,8 +2015,7 @@
           break;
         }
         deferOverlayIdleBump = true;
-        runScenicSequence();
-        confirm(reply || "准备拍照");
+        runScenicSequence({ announce: reply || "准备拍照" });
         break;
       case "scenic_close":
         state.panels.scenic = false;
@@ -2161,38 +2306,54 @@
       });
   }
 
-  function runScenicSequence() {
-    state.scenic.shooting = true;
-    var count = 3;
-    var overlay = $("scenicCountdown");
-    var vid = $("camPreview");
-    function step() {
-      if (count > 0) {
-        overlay.textContent = count;
-        overlay.classList.remove("hidden");
-        speakOrToast(count + "");
-        count--;
-        setTimeout(step, 900);
-      } else {
-        overlay.textContent = "咔嚓";
-        try {
-          var beep = new Audio(
-            "data:audio/wav;base64,UklGRlQAAABXQVZFZm10IBAAAAABAAEAQB8AAIB8AAACABAAZGF0YRQAAACAgICAgPEBAP//w=="
-          );
-          beep.volume = 0.3;
-          beep.play().catch(function () {});
-        } catch (e) {}
-        setTimeout(function () {
-          overlay.classList.add("hidden");
-          composeScenic(vid);
-          state.scenic.shooting = false;
-          syncChrome();
-          speakOrToast("哇，拍的照片真美呆了！");
-          resetAllOverlaysBump();
-        }, 700);
+  function runScenicSequence(opts) {
+    opts = opts || {};
+    var announce = String(opts.announce || "").trim();
+
+    function startCountdown() {
+      state.scenic.shooting = true;
+      var count = 3;
+      var overlay = $("scenicCountdown");
+      var vid = $("camPreview");
+      speakOrToast("三、二、一");
+      function step() {
+        if (count > 0) {
+          if (overlay) {
+            overlay.textContent = count;
+            overlay.classList.remove("hidden");
+          }
+          count--;
+          setTimeout(step, 1000);
+        } else {
+          if (overlay) overlay.textContent = "咔嚓";
+          try {
+            var beep = new Audio(
+              "data:audio/wav;base64,UklGRlQAAABXQVZFZm10IBAAAAABAAEAQB8AAIB8AAACABAAZGF0YRQAAACAgICAgPEBAP//w=="
+            );
+            beep.volume = 0.3;
+            beep.play().catch(function () {});
+          } catch (e) {}
+          setTimeout(function () {
+            if (overlay) overlay.classList.add("hidden");
+            composeScenic(vid);
+            state.scenic.shooting = false;
+            syncChrome();
+            speakOrToast("哇，拍的照片真美呆了！");
+            resetAllOverlaysBump();
+          }, 700);
+        }
       }
+      step();
     }
-    step();
+
+    if (announce) {
+      speakOrToast(announce, {
+        interrupt: true,
+        onEnd: startCountdown,
+      });
+    } else {
+      startCountdown();
+    }
   }
 
   function composeScenic(videoEl) {
@@ -2349,6 +2510,17 @@
       coffee_cart_nonempty: coffeeCartQty > 0,
       coffee_waiting_qr: !!state.coffee.qr,
       coffee_suggested_shop: state.coffee.suggestedShop || "",
+      /** 乘员感知 OCC：最近乘客手势/表情/肢体/年龄/性别（供语音上下文） */
+      occ_enabled:
+        typeof window.OccPerception !== "undefined" &&
+        typeof window.OccPerception.isEnabled === "function"
+          ? window.OccPerception.isEnabled()
+          : true,
+      occ_passenger:
+        typeof window.OccPerception !== "undefined" &&
+        typeof window.OccPerception.getSnapshot === "function"
+          ? window.OccPerception.getSnapshot()
+          : null,
     };
   }
 
@@ -2757,6 +2929,7 @@
     state: state,
     handleIntent: handleIntent,
     getVoiceContext: getVoiceContext,
+    resolveCoffeeVoiceUtterance: resolveCoffeeVoiceUtterance,
     applyAdaptiveCruise: applyAdaptiveCruise,
     tryAutoOvertake: tryAutoOvertake,
   };

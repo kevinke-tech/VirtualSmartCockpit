@@ -12,6 +12,7 @@ intent rules and listens on port **5002**, and mounts static files so one proces
 replaces VUI split (http-server :8080 + API :5001).
 """
 
+import asyncio
 import io
 import json
 import os
@@ -19,7 +20,7 @@ import re
 import sys
 import threading
 import wave
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 import httpx
 import numpy as np
@@ -29,6 +30,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
+from intent_local import classify_local_intent, local_intent_status
+
 # Doubao Ark / FunASR / Volc TTS secrets — NOT committed. Create `.env.local` in this folder
 # (copy from `.env.example` or from `..\vui\.env.local`). Optional `.env` is also loaded first.
 load_dotenv(".env")
@@ -37,8 +40,58 @@ load_dotenv(".env.local", override=True)
 # --- Config ---
 ARK_API_KEY = os.getenv("ARK_API_KEY", "")
 CHAT_DOUBAO_MODEL = os.getenv("CHAT_DOUBAO_MODEL", "doubao-seed-2-0-mini-260215")
+CHAT_VISION_MODEL = os.getenv("CHAT_VISION_MODEL", CHAT_DOUBAO_MODEL)
 ARK_API_BASE = "https://ark.cn-beijing.volces.com/api/v3"
+
+# OCC 视觉兜底：doubao（火山方舟）| vllm（公司内网 OpenAI 兼容，同 VOX bicv / chatBot_emoji）
+_raw_occ_vision_backend = os.getenv("OCC_VISION_BACKEND", "doubao").strip().lower()
+OCC_VISION_BACKEND = (
+    "vllm"
+    if _raw_occ_vision_backend in ("vllm", "company", "internal", "openai", "bicv")
+    else "doubao"
+)
+OCC_VLLM_BASE_URL = (
+    os.getenv("OCC_VLLM_BASE_URL", os.getenv("VLLM_OPENAI_BASE", "")).strip().rstrip("/")
+)
+OCC_VLLM_MODEL = os.getenv(
+    "OCC_VLLM_MODEL",
+    os.getenv(
+        "VLLM_MODEL",
+        "/huggingface/models/Qwen/Qwen3-VL-8B-Instruct",
+    ),
+)
+OCC_VLLM_API_KEY = os.getenv("OCC_VLLM_API_KEY", os.getenv("VLLM_API_KEY", "")).strip()
+OCC_VLLM_TIMEOUT_SEC = float(os.getenv("OCC_VLLM_TIMEOUT_SEC", "45"))
+
+
+def _occ_vllm_chat_completions_url() -> str:
+    """OpenAI 兼容：POST .../v1/chat/completions（同 VOX TRIGGER_BICV / chatBot_emoji vLLM）。"""
+    b = OCC_VLLM_BASE_URL
+    if not b:
+        return ""
+    if b.endswith("/chat/completions"):
+        return b
+    if not b.endswith("/v1"):
+        b = b + "/v1"
+    return b + "/chat/completions"
+
+
+def occ_vision_is_configured() -> bool:
+    if OCC_VISION_BACKEND == "vllm":
+        return bool(_occ_vllm_chat_completions_url())
+    return bool(ARK_API_KEY)
+
+
 FUNASR_MODEL = os.getenv("FUNASR_OFFLINE_MODEL", "paraformer-zh")
+ASR_HOTWORDS = os.getenv(
+    "FUNASR_HOTWORDS",
+    (
+        "虚拟座舱 小座舱 导航 超车 变道 靠边停车 沿途 途经点 "
+        "驾驶员监测 疲劳监测 DMS 空调 除雾 风量 "
+        "生椰拿铁 橙C美式 标准美式 加浓美式 经典拿铁 摩卡 轻乳茶 "
+        "风景打卡 拍照 照片库"
+    ),
+).strip()
 SAMPLE_RATE = 16000
 
 VOLC_TTS_APP_ID = os.getenv("VOLC_TTS_APP_ID", "")
@@ -51,12 +104,25 @@ VOLC_TTS_CLUSTER = os.getenv("VOLC_TTS_CLUSTER", "volcano_tts")
 print(
     "[Cockpit] ARK:",
     "set (" + ARK_API_KEY[:8] + "...)" if ARK_API_KEY else "NOT SET",
-    "| model:",
+    "| intent model:",
     CHAT_DOUBAO_MODEL,
 )
+if OCC_VISION_BACKEND == "vllm":
+    print(
+        "[Cockpit] OCC vision: vllm |",
+        _occ_vllm_chat_completions_url() or "NOT SET",
+        "| model:",
+        OCC_VLLM_MODEL,
+    )
+else:
+    print(
+        "[Cockpit] OCC vision: doubao | model:",
+        CHAT_VISION_MODEL,
+    )
 
 _asr_model = None
 _asr_model_lock = threading.Lock()
+_asr_infer_lock = threading.Lock()
 
 
 def _get_asr_model():
@@ -124,12 +190,30 @@ def transcribe_wav(wav_bytes: bytes) -> str:
     if arr.size < 400:
         return ""
     audio_dur = arr.size / SAMPLE_RATE
+    # 极短指令（如“暂停”“摩卡”）前后留少量静音，避免非流式 Paraformer
+    # 在紧贴边界的音节上重复或漏字；日志仍记录原始音频时长。
+    infer_arr = arr
+    if audio_dur < 1.0:
+        pad = np.zeros(int(SAMPLE_RATE * 0.20), dtype=np.float32)
+        infer_arr = np.concatenate((pad, arr, pad))
     model = _get_asr_model()
-    res = model.generate(input=np.ascontiguousarray(arr, dtype=np.float32))
+    generate_kwargs = {"input": np.ascontiguousarray(infer_arr, dtype=np.float32)}
+    if ASR_HOTWORDS:
+        generate_kwargs["hotword"] = ASR_HOTWORDS
+    # FunASR 单例不保证并发 generate 线程安全；串行推理避免请求重叠抢占 CPU。
+    with _asr_infer_lock:
+        res = model.generate(**generate_kwargs)
     text = _extract_asr_text(res)
+    # 部分 FunASR/ModelScope 版本会在每个中文字之间插空格；这会削弱本地
+    # embedding 和 LLM 对整句语义的理解，座舱命令中去掉空白更合适。
+    text = re.sub(r"\s+", "", text)
+    rms = float(np.sqrt(np.mean(np.square(arr)))) if arr.size else 0.0
+    peak = float(np.max(np.abs(arr))) if arr.size else 0.0
+    clipped = float(np.mean(np.abs(arr) >= 0.98)) * 100.0 if arr.size else 0.0
     t2 = time.perf_counter()
     print(
-        f"[ASR] '{text}' | {audio_dur:.1f}s | {(t2-t0)*1000:.0f}ms",
+        f"[ASR] '{text}' | {audio_dur:.1f}s | {(t2-t0)*1000:.0f}ms "
+        f"| rms={rms:.4f} peak={peak:.3f} clip={clipped:.2f}%",
         flush=True,
     )
     return text
@@ -323,6 +407,132 @@ async def call_doubao_chat(messages: list, temperature: float = 0.3) -> str:
         if resp.status_code != 200:
             raise ValueError(resp.text)
         return resp.json()["choices"][0]["message"]["content"]
+
+
+def _parse_json_loose(text: str) -> Any:
+    t = (text or "").strip()
+    if "```" in t:
+        for ch in t.split("```"):
+            ch = ch.strip()
+            if ch.lower().startswith("json"):
+                ch = ch[4:].strip()
+            if ch.startswith("{"):
+                t = ch
+                break
+    s = t.find("{")
+    e = t.rfind("}")
+    if s < 0 or e <= s:
+        raise ValueError("no JSON object in model output")
+    return json.loads(t[s : e + 1])
+
+
+def _user_content_with_image(text: str, image_data_url: str) -> Any:
+    if image_data_url and image_data_url.startswith("data:image"):
+        img_part: dict[str, Any] = {
+            "type": "image_url",
+            "image_url": {"url": image_data_url},
+        }
+        txt_part: dict[str, Any] = {"type": "text", "text": text}
+        # 内网 Qwen3-VL 习惯先图后文；火山方舟习惯先文后图
+        if OCC_VISION_BACKEND == "vllm":
+            return [img_part, txt_part]
+        return [txt_part, img_part]
+    return text
+
+
+def _extract_chat_completion_text(data: dict) -> str:
+    msg = (data.get("choices") or [{}])[0].get("message") or {}
+    content = msg.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    return str(content or "")
+
+
+_OCC_VISION_PROMPT = """你是车载座舱摄像头分析助手。画面里可能有多人，请**只分析离摄像头最近、人脸/身体最大、最清晰的那一位**（主乘员）。
+
+前端 MediaPipe 已给出 fast_hint（可能不准或缺失）。请结合图像独立判断，并输出 JSON。
+
+字段说明（按需填写 needs 列表中的项，未请求的键可省略）：
+- gesture: { "label": "中文手势描述", "confidence": 0~1 }
+- expression: { "label": "中文表情/情绪（如 微笑、平静、惊讶、生气）", "confidence": 0~1 }
+- body_action: { "label": "中文肢体动作简述（如 左臂抬起、双手放在腿上）", "confidence": 0~1 }
+- age: { "label": "估计年龄区间（如 25-30岁、青少年、中年）", "confidence": 0~1 }
+- gender: { "label": "性别（男/女/未知，中文）", "confidence": 0~1 }
+
+规则：
+1. 若看不清主乘员或无人，对应项 confidence 设 0.1 以内，label 说明原因。
+2. 只回复合法 JSON，不要 markdown，不要解释。
+3. 键名必须用 snake_case。"""
+
+
+async def call_occ_vision(
+    messages: list,
+    *,
+    temperature: float = 0.22,
+    max_tokens: int = 420,
+) -> str:
+    if OCC_VISION_BACKEND == "vllm":
+        url = _occ_vllm_chat_completions_url()
+        if not url:
+            raise ValueError(
+                "OCC_VLLM_BASE_URL not configured (e.g. http://your-vllm-host:port/v1)"
+            )
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if OCC_VLLM_API_KEY:
+            headers["Authorization"] = f"Bearer {OCC_VLLM_API_KEY}"
+        model = OCC_VLLM_MODEL
+        timeout = OCC_VLLM_TIMEOUT_SEC
+    else:
+        if not ARK_API_KEY:
+            raise ValueError("ARK_API_KEY not configured")
+        url = f"{ARK_API_BASE}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {ARK_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        model = CHAT_VISION_MODEL
+        timeout = 45.0
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            url,
+            headers=headers,
+            json={
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            raise ValueError(resp.text)
+        return _extract_chat_completion_text(resp.json())
+
+
+# 兼容旧名
+call_doubao_vision = call_occ_vision
+
+
+def _occ_field(raw: Any, default_label: str = "—") -> dict:
+    if not isinstance(raw, dict):
+        return {"label": default_label, "confidence": 0.0}
+    label = raw.get("label")
+    if label is None:
+        label = default_label
+    else:
+        label = str(label).strip() or default_label
+    try:
+        conf = float(raw.get("confidence", 0))
+    except (TypeError, ValueError):
+        conf = 0.0
+    conf = max(0.0, min(1.0, conf))
+    return {"label": label, "confidence": conf}
 
 
 _CN_NUM = {
@@ -609,6 +819,51 @@ def _fast_nav_pickup_contact(norm: str, context: Optional[dict]) -> Optional[dic
     }
 
 
+def _extract_nav_destination_text(norm: str) -> Optional[str]:
+    if not norm:
+        return None
+    t = norm.strip()
+    patterns = (
+        r"(?:导航到|导航去|导到|开到|开去|前往|去往|直达|到达)(.+)$",
+        r"(?:目的地(?:改成|设为|设置为|是|到)?)(.+)$",
+        r"(?:我们去|就去|改成去)(.+)$",
+    )
+    for p in patterns:
+        m = re.search(p, t)
+        if not m:
+            continue
+        d = (m.group(1) or "").strip()
+        d = re.sub(r"^(?:一下|一趟|一个|去|到|往)+", "", d)
+        d = re.sub(r"(?:吧|好吗|可以吗|行吗|呢|呀|啊)+$", "", d)
+        d = d.strip()
+        if not d:
+            continue
+        if any(k in d for k in ("顺便", "顺路", "沿路", "沿途", "途经")):
+            continue
+        if any(k in d for k in ("导航", "路线", "规划")) and len(d) <= 4:
+            continue
+        return d
+    return None
+
+
+def _fast_nav_set_destination(norm: str) -> Optional[dict]:
+    if not norm:
+        return None
+    if not any(k in norm for k in ("导航", "目的地", "前往", "去往", "直达", "开到", "开去")):
+        return None
+    if _utterance_pickup_via_detour(norm) or _utterance_has_pickup_intent(norm):
+        return None
+    dest = _extract_nav_destination_text(norm)
+    if not dest:
+        return None
+    return {
+        "action": "nav_set_destination",
+        "params": {"destination": dest},
+        "response": "好的，已把目的地设为：" + dest + "。正在打开导航规划。",
+        "match": "fast",
+    }
+
+
 _NAV_TO_WAYPOINT_MARKERS = frozenset(
     (
         "顺便",
@@ -634,6 +889,13 @@ def _postprocess_nav_intent(
     ctx = context or {}
     p = dict(params or {})
     t = _normalize_command_text(user_text)
+    explicit_dest = _extract_nav_destination_text(t)
+    explicit_detour = any(k in t for k in ("顺便", "顺路", "顺带", "沿途", "沿路", "途经", "加一站", "绕一下"))
+
+    # 用户明确说了“导航到X/目的地改成X”时，以 X 为准，避免被消息里的接人地点误覆盖。
+    if explicit_dest and not explicit_detour and not _utterance_has_pickup_intent(t):
+        action = "nav_set_destination"
+        p["destination"] = explicit_dest
 
     pu_dest = _pickup_nav_destination(ctx, user_text)
     if pu_dest:
@@ -704,6 +966,85 @@ def _postprocess_nav_intent(
     return action, p, None
 
 
+def _canonical_along_route_poi_category(raw: str) -> str:
+    """把口语里的 POI 类别归一化为简短检索词。"""
+    s = (raw or "").strip().strip("吧呢啊嘛的了一下 ")
+    if not s:
+        return ""
+    if any(k in s for k in ("咖啡", "星巴克", "瑞幸", "costa", "cafe")):
+        return "咖啡店"
+    if any(k in s for k in ("加油", "油站", "中石化", "中石油", "壳牌", "bp")):
+        return "加油站"
+    if any(k in s for k in ("充电", "快充", "充电桩")):
+        return "充电站"
+    if "服务区" in s:
+        return "服务区"
+    if any(k in s for k in ("厕所", "洗手间", "卫生间", "公厕")):
+        return "公共卫生间"
+    if any(k in s for k in ("商场", "购物", "mall")):
+        return "商场"
+    if any(k in s for k in ("药店", "药房", "药局")):
+        return "药店"
+    if any(k in s for k in ("银行", "atm", "取款")):
+        return "银行"
+    if any(k in s for k in ("超市", "便利店", "711", "全家")):
+        return "超市"
+    if any(k in s for k in ("餐厅", "饭店", "吃饭", "餐馆", "美食")):
+        return "餐厅"
+    if any(k in s for k in ("书店", "图书", "书城", "书屋")):
+        return "书店"
+    return s
+
+
+def _resolve_along_route_poi_query(utterance: str, params_query: str = "") -> str:
+    """从原话 + LLM params 中解析沿路 POI 类别，避免落成「兴趣点」占位。"""
+    norm = _normalize_command_text(utterance)
+    junk = frozenset({"沿途兴趣点", "兴趣点", "poi", "沿途poi", "沿途 POI", "POI"})
+
+    detected = _detect_along_route_poi_query(norm)
+    if detected and detected.lower() not in junk:
+        return detected
+
+    spoken = _extract_spoken_along_route_poi_category(norm)
+    if spoken and spoken.lower() not in junk:
+        return spoken
+
+    pq = _canonical_along_route_poi_category((params_query or "").strip())
+    if pq and pq.lower() not in junk:
+        return pq
+
+    m = re.search(r"(?:搜|找|查)(?:索|一下|下)?(.+)$", norm)
+    if m:
+        cat = _canonical_along_route_poi_category(m.group(1).strip())
+        if cat and cat.lower() not in junk and len(cat) >= 2:
+            return cat
+
+    if "书店" in norm or "图书" in norm or "书城" in norm:
+        return "书店"
+    return "沿途兴趣点"
+
+
+def _extract_spoken_along_route_poi_category(norm: str) -> Optional[str]:
+    """从整句里抠出用户真正想搜的 POI 类别（如「沿途搜索咖啡店」→ 咖啡店）。"""
+    patterns = (
+        r"(?:沿途|沿路|顺路|路上|顺便|顺带|路边|前边|前方|行程中)"
+        r"(?:帮我|帮忙|给我|能否|可以)?"
+        r"(?:搜索|搜(?:索|一下|下)?|找(?:一下|下)?|查(?:询|找|看)?(?:一下|下)?)"
+        r"(.+)$",
+        r"(?:沿途|沿路|顺路|路上|顺便|顺带)(?:的|有|有没有|附近|能不能|能否)?(.{2,14})$",
+    )
+    for pat in patterns:
+        m = re.search(pat, norm)
+        if not m:
+            continue
+        cat = m.group(1).strip("吧呢啊嘛的了一下 ")
+        cat = re.sub(r"^(有哪些|有什么|哪儿有|哪里有|能不能|能否)", "", cat).strip()
+        cat = _canonical_along_route_poi_category(cat)
+        if cat and cat not in ("沿途", "顺路", "沿路", "兴趣点", "沿途兴趣点"):
+            return cat
+    return None
+
+
 def _detect_along_route_poi_query(norm: str) -> Optional[str]:
     """短语含沿路语境 + 找 POI → 返回 query 简述；否则 None。"""
     along = any(
@@ -712,6 +1053,8 @@ def _detect_along_route_poi_query(norm: str) -> Optional[str]:
             "沿途",
             "沿路",
             "顺路",
+            "顺便",
+            "顺带",
             "路上",
             "路边",
             "前边",
@@ -746,9 +1089,20 @@ def _detect_along_route_poi_query(norm: str) -> Optional[str]:
         seek = True
     elif along and "服务区" in norm:
         seek = True
+    elif along and any(k in norm for k in ("咖啡", "星巴克", "瑞幸")):
+        seek = True
+    elif along and any(
+        k in norm
+        for k in ("药店", "药房", "银行", "超市", "餐厅", "饭店", "商场", "书店", "图书", "书城")
+    ):
+        seek = True
 
     if not along or not seek:
         return None
+
+    spoken = _extract_spoken_along_route_poi_category(norm)
+    if spoken:
+        return spoken
 
     if "加油" in norm or "加油站" in norm or "油站" in norm:
         return "加油站"
@@ -760,13 +1114,20 @@ def _detect_along_route_poi_query(norm: str) -> Optional[str]:
         return "公共卫生间"
     if "商场" in norm or ("购物" in norm and "中心" in norm):
         return "商场"
+    if any(k in norm for k in ("咖啡", "星巴克", "瑞幸")):
+        return "咖啡店"
+    if any(k in norm for k in ("书店", "图书", "书城", "书屋")):
+        return "书店"
+    spoken = _extract_spoken_along_route_poi_category(norm)
+    if spoken:
+        return spoken
     return "沿途兴趣点"
 
 
 def _fast_nav_along_route_poi(t: str) -> Optional[dict]:
-    q = _detect_along_route_poi_query(t)
-    if not q:
+    if _detect_along_route_poi_query(t) is None:
         return None
+    q = _resolve_along_route_poi_query(t, "")
     return {
         "action": "nav_along_route_poi_start",
         "params": {"query": q},
@@ -1113,36 +1474,151 @@ def _fast_dms_intents(norm: str, context: dict) -> Optional[dict]:
     return None
 
 
+def _find_coffee_menu_item(menu: list, sku: str) -> Optional[tuple[str, str]]:
+    for item in menu or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("sku") or "").strip() == sku:
+            name = str(item.get("name") or sku).strip()
+            return sku, name
+    return None
+
+
+def _extract_coffee_qty(norm: str) -> int:
+    m = re.search(r"(\d+)\s*杯", norm)
+    if m:
+        return max(1, min(9, int(m.group(1))))
+    cn = {"一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    m2 = re.search(r"([一二两三四五六七八九])杯", norm)
+    if m2:
+        return max(1, min(9, cn.get(m2.group(1), 1)))
+    if "两杯" in norm or "来两" in norm or "两份" in norm:
+        return 2
+    if "三杯" in norm:
+        return 3
+    return 1
+
+
+def _resolve_coffee_sku_from_speech(norm: str, context: dict) -> Optional[tuple[str, str]]:
+    """饮品口语 → (sku, display_name)；与前端 resolveCoffeeSkuFromSpeech 对齐。"""
+    menu = (context or {}).get("coffee_menu") or []
+    norm_lc = norm.lower().replace(" ", "")
+    if not norm_lc:
+        return None
+
+    best_sku, best_name, best = None, None, 0
+    for item in menu:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        sku = str(item.get("sku") or "").strip()
+        if not name or not sku:
+            continue
+        nx = name.replace(" ", "").lower()
+        if nx in norm_lc or norm_lc in nx:
+            overlap = min(len(nx), len(norm_lc))
+            if overlap > best:
+                best = overlap
+                best_sku, best_name = sku, name
+    if best_sku and best >= 2:
+        return best_sku, best_name
+
+    if re.search(r"橙.?美式|^橙c|橙汁美式|橙汁", norm_lc):
+        hit = _find_coffee_menu_item(menu, "orange-am")
+        return hit or ("orange-am", "橙C美式")
+    if re.search(r"生椰拿铁|^生椰|椰浆拿铁|椰云拿铁", norm_lc):
+        hit = _find_coffee_menu_item(menu, "latte-raw")
+        return hit or ("latte-raw", "生椰拿铁")
+    if re.search(r"椰拿|生椰|椰浆", norm_lc) and "拿铁" in norm_lc:
+        hit = _find_coffee_menu_item(menu, "latte-raw")
+        return hit or ("latte-raw", "生椰拿铁")
+    if re.search(r"加浓|双倍", norm_lc) and (
+        re.search(r"美式|浓缩", norm_lc) or len(norm_lc) <= 8
+    ):
+        hit = _find_coffee_menu_item(menu, "ice-am")
+        return hit or ("ice-am", "加浓美式")
+    if "美式" in norm_lc and not re.search(r"橙|果|加浓|浓", norm_lc):
+        hit = _find_coffee_menu_item(menu, "std-am")
+        return hit or ("std-am", "标准美式")
+    if "拿铁" in norm_lc and not re.search(r"生椰|椰|椰浆", norm_lc):
+        hit = _find_coffee_menu_item(menu, "latte-std")
+        return hit or ("latte-std", "经典拿铁")
+    if "摩卡" in norm_lc:
+        hit = _find_coffee_menu_item(menu, "mocha")
+        return hit or ("mocha", "摩卡")
+    if re.search(r"乳茶|轻乳|奶茶", norm_lc):
+        hit = _find_coffee_menu_item(menu, "milk-tea")
+        return hit or ("milk-tea", "轻乳茶")
+    if best_sku:
+        return best_sku, best_name or best_sku
+    return None
+
+
+_COFFEE_CHECKOUT_KWS = (
+    "下单",
+    "付款",
+    "扫码",
+    "买好了",
+    "就这些",
+    "就这要",
+    "没有了",
+    "不要了",
+    "不用了",
+    "不用啦",
+    "不要别的",
+    "不要别的了",
+    "不用别的",
+    "没有别的",
+    "没别的",
+    "没别的了",
+    "够了",
+    "可以了",
+    "行了就这些",
+    "不点了",
+    "去结算",
+    "去付款",
+    "结账",
+    "确认付款",
+    "可以付款了",
+    "可以付款",
+    "就这些吧",
+    "好了就这些",
+)
+
+_COFFEE_CLOSE_KWS = ("关闭咖啡", "退出咖啡", "退出点单", "关了点单", "收起咖啡", "关掉咖啡")
+
+
+def _coffee_add_response(name: str, qty: int) -> str:
+    if qty > 1:
+        return f"好的，已为你要了{name}，共{qty}杯。还需要别的吗？"
+    return f"好的，已为你要了{name}。还需要别的吗？"
+
+
 def _fast_coffee_intents(norm: str, context: dict) -> Optional[dict]:
-    """咖啡馆级语音：结账仅当购物车非空，避免「买好了」误触发空单。"""
+    """咖啡馆多轮语音：点单页打开时优先结账/加购/关闭；全菜单 SKU 不靠 LLM。"""
     ctx = context or {}
-    if ctx.get("coffee_cart_nonempty"):
-        for kw in (
-            "下单",
-            "付款",
-            "扫码",
-            "买好了",
-            "就这些",
-            "就这要",
-            "没有了",
-            "不要了",
-            "不用了",
-            "不用啦",
-            "不要别的",
-            "不要别的了",
-            "不用别的",
-            "没有别的",
-            "没别的",
-            "没别的了",
-            "够了",
-            "可以了",
-            "行了就这些",
-            "不点了",
-            "去结算",
-            "去付款",
-            "结账",
-            "确认付款",
-        ):
+    overlay = bool(ctx.get("overlay_coffee"))
+    cart = bool(ctx.get("coffee_cart_nonempty"))
+
+    if overlay:
+        for kw in _COFFEE_CLOSE_KWS:
+            if kw in norm:
+                return {
+                    "action": "coffee_close",
+                    "params": {},
+                    "response": "好的，咖啡点单已关闭。",
+                    "match": "fast",
+                }
+        if norm in ("关闭", "退出"):
+            return {
+                "action": "coffee_close",
+                "params": {},
+                "response": "好的，已退出点单。",
+                "match": "fast",
+            }
+
+    if overlay or cart:
+        for kw in _COFFEE_CHECKOUT_KWS:
             if kw in norm:
                 return {
                     "action": "coffee_confirm_pay",
@@ -1151,31 +1627,49 @@ def _fast_coffee_intents(norm: str, context: dict) -> Optional[dict]:
                     "match": "fast",
                 }
 
-    # 单行点单直达（不靠 LLM 拼 params）：与座舱 COFFEE_MENU 一致
-    if "轻乳茶" in norm:
-        return {
-            "action": "coffee_add_item",
-            "params": {"sku": "milk-tea", "drink": "轻乳茶"},
-            "response": "好的，已为你要了轻乳茶，还要看别的饮品吗？",
-            "match": "fast",
-        }
-    if "生椰拿铁" in norm or ("生椰" in norm and "拿铁" in norm):
-        return {
-            "action": "coffee_add_item",
-            "params": {"sku": "latte-raw", "drink": "生椰拿铁"},
-            "response": "好的，已为你要了生椰拿铁。还需要加点别的吗？",
-            "match": "fast",
-        }
-    # 橙汁系美式 / 「橙+C+美式」等 ASR（橙c / 橙C / 橙西…）
-    if ("美式" in norm and ("橙" in norm or "c" in norm.lower())) or "橙c美式" in norm.lower():
-        return {
-            "action": "coffee_add_item",
-            "params": {"sku": "orange-am", "drink": "橙C美式"},
-            "response": "好的，已为你要了橙C美式。还要看别的饮品吗？",
-            "match": "fast",
-        }
+    if (overlay or cart) and re.search(r"再来|再加|还要一杯|还要一个|再来一杯|再加一杯", norm):
+        preview = ctx.get("coffee_cart_lines_preview") or []
+        if preview and isinstance(preview[-1], dict):
+            last_name = str(preview[-1].get("name") or "").strip()
+            hit = _resolve_coffee_sku_from_speech(last_name.replace(" ", ""), ctx) if last_name else None
+            if hit:
+                sku, name = hit
+                qty = _extract_coffee_qty(norm)
+                return {
+                    "action": "coffee_add_item",
+                    "params": {"sku": sku, "drink": name, "qty": qty},
+                    "response": _coffee_add_response(name, qty),
+                    "match": "fast",
+                }
 
-    for kw in ("点咖啡", "订咖啡", "喝杯咖啡", "来杯咖啡"):
+    order_like = (
+        any(
+            x in norm
+            for x in ("拿铁", "美式", "摩卡", "乳茶", "奶茶", "椰", "橙", "浓缩", "经典", "标准", "加浓")
+        )
+        or re.search(r"来|加|要|点|杯|再来|买", norm)
+        or (overlay and len(norm) <= 8)
+    )
+    if order_like:
+        hit = _resolve_coffee_sku_from_speech(norm, ctx)
+        if hit:
+            sku, name = hit
+            qty = _extract_coffee_qty(norm)
+            return {
+                "action": "coffee_add_item",
+                "params": {"sku": sku, "drink": name, "qty": qty},
+                "response": _coffee_add_response(name, qty),
+                "match": "fast",
+            }
+
+    if overlay and any(k in norm for k in ("有什么", "菜单", "喝什么", "推荐什么", "有哪些", "点什么")):
+        hint = (ctx.get("coffee_menu_names_hint") or "").strip()
+        msg = "好的，您可以在屏幕上选，也可以直接说名字。"
+        if hint:
+            msg += f"今天有{hint}等，您想喝哪款？"
+        return {"action": "coffee_open", "params": {}, "response": msg, "match": "fast"}
+
+    for kw in ("点咖啡", "订咖啡", "喝杯咖啡", "来杯咖啡", "想喝咖啡", "打开咖啡", "我要点喝的"):
         if kw in norm:
             hint = (ctx.get("coffee_menu_names_hint") or "").strip()
             msg = "好的，帮您打开车内点单。"
@@ -1287,9 +1781,16 @@ def _fast_ac_comfort_intents(norm: str, context: dict) -> Optional[dict]:
 
 def fast_match_cockpit(text: str, context: dict) -> Optional[dict]:
     t = _normalize_command_text(text)
+    cf = _fast_coffee_intents(t, context)
+    if cf:
+        return cf
+
     fk = _fast_nav_pickup_contact(t, context)
     if fk:
         return fk
+    nd = _fast_nav_set_destination(t)
+    if nd:
+        return nd
     pp = _fast_poi_candidate_pick(t, context)
     if pp:
         return pp
@@ -1316,18 +1817,18 @@ def fast_match_cockpit(text: str, context: dict) -> Optional[dict]:
     if dmsf:
         return dmsf
 
-    cf = _fast_coffee_intents(t, context)
-    if cf:
-        return cf
-
     pairs = [
         (
             [
                 "读一下信息",
+                "读下信息",
                 "念一下信息",
                 "朗读信息",
                 "读信息",
                 "帮我读信息",
+                "帮我读下信息",
+                "帮我查一下信息",
+                "查一下信息",
                 "谁给我发",
                 "谁发的信息",
                 "谁发的",
@@ -1507,6 +2008,21 @@ def _substantive(text: str) -> bool:
     return t.replace(" ", "") not in _FILLER
 
 
+def _finalize_intent_result(text: str, context: dict, base: dict) -> dict:
+    """规则/本地/LLM 共用：驾驶纠错、导航 postprocess、沿路 POI query。"""
+    na, nr = _correct_drive_actions_from_text(
+        text, base["action"], base.get("response") or ""
+    )
+    params = base.get("params") or {}
+    if na.startswith("nav_"):
+        na, params, nav_voice = _postprocess_nav_intent(na, params, context, text)
+        if nav_voice is not None:
+            nr = nav_voice
+    if na == "nav_along_route_poi_start":
+        params["query"] = _resolve_along_route_poi_query(text, params.get("query") or "")
+    return {**base, "action": na, "response": nr or base.get("response"), "params": params}
+
+
 async def recognize_cockpit_intent(text: str, context: dict) -> dict:
     ts = (text or "").strip()
     if not ts:
@@ -1514,15 +2030,12 @@ async def recognize_cockpit_intent(text: str, context: dict) -> dict:
 
     fast = fast_match_cockpit(ts, context)
     if fast:
-        na, nr = _correct_drive_actions_from_text(
-            ts, fast["action"], fast.get("response") or ""
-        )
-        params = fast.get("params") or {}
-        if na.startswith("nav_"):
-            na, params, nav_voice = _postprocess_nav_intent(na, params, context, ts)
-            if nav_voice is not None:
-                nr = nav_voice
-        return {**fast, "action": na, "response": nr or fast.get("response"), "params": params}
+        return _finalize_intent_result(ts, context, fast)
+
+    local = classify_local_intent(ts)
+    if local:
+        return _finalize_intent_result(ts, context, local)
+
     if not _substantive(ts):
         return {"action": "none", "response": "", "match": "skip"}
     if not ARK_API_KEY:
@@ -1562,6 +2075,8 @@ async def recognize_cockpit_intent(text: str, context: dict) -> dict:
         action, params, nav_voice = _postprocess_nav_intent(action, params, context, ts)
         if nav_voice is not None:
             resp = nav_voice
+    if action == "nav_along_route_poi_start":
+        params["query"] = _resolve_along_route_poi_query(ts, params.get("query") or "")
 
     if action == "chat":
         cr = await call_doubao_chat(
@@ -1602,12 +2117,24 @@ class TTSRequest(BaseModel):
     text: str
 
 
+class OccFallbackReq(BaseModel):
+    image: str
+    needs: list[str] = []
+    fast_hint: Optional[dict] = None
+
+
 async def _health_body():
     """Do not preload FunASR here — first /asr call loads the model."""
     return {
         "status": "ok",
         "asr_available": True,
         "llm_available": bool(ARK_API_KEY),
+        "occ_vision_available": occ_vision_is_configured(),
+        "occ_vision_backend": OCC_VISION_BACKEND,
+        "occ_vision_model": (
+            OCC_VLLM_MODEL if OCC_VISION_BACKEND == "vllm" else CHAT_VISION_MODEL
+        ),
+        "intent_local": local_intent_status(),
     }
 
 
@@ -1629,7 +2156,9 @@ async def asr_endpoint(request: Request):
     if not wav_bytes or len(wav_bytes) < 44:
         return JSONResponse({"ok": False, "error": "empty"}, status_code=400)
     try:
-        text = transcribe_wav(wav_bytes)
+        # 不在 FastAPI event loop 内直接运行 CPU 密集型 FunASR；
+        # OCC/health/intent 请求可在识别期间继续响应。
+        text = await asyncio.to_thread(transcribe_wav, wav_bytes)
         return {"ok": True, "text": text}
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
@@ -1692,6 +2221,65 @@ async def tts_endpoint(req: TTSRequest):
         )
     audio_bytes = _b64.b64decode(data["data"])
     return Response(content=audio_bytes, media_type="audio/mpeg")
+
+
+@app.post("/vision/occ_fallback")
+async def vision_occ_fallback(req: OccFallbackReq):
+    """OCC 第二层：仅在前端 MediaPipe 低置信/缺年龄时按需调用。"""
+    img = (req.image or "").strip()
+    if not img.startswith("data:image"):
+        return JSONResponse({"ok": False, "error": "invalid image"}, status_code=400)
+    if not occ_vision_is_configured():
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": (
+                    "OCC vision not configured "
+                    "(set OCC_VISION_BACKEND=vllm + OCC_VLLM_BASE_URL, or ARK_API_KEY for doubao)"
+                ),
+            },
+            status_code=503,
+        )
+    needs = [str(x).strip().lower() for x in (req.needs or []) if str(x).strip()]
+    if not needs:
+        needs = ["expression", "age", "gender"]
+    hint = req.fast_hint or {}
+    prompt = (
+        _OCC_VISION_PROMPT
+        + f"\n\nneeds: {json.dumps(needs, ensure_ascii=False)}"
+        + f"\nfast_hint: {json.dumps(hint, ensure_ascii=False)}"
+    )
+    try:
+        raw = await call_occ_vision(
+            [
+                {
+                    "role": "user",
+                    "content": _user_content_with_image(prompt, img),
+                }
+            ],
+            temperature=0.22,
+            max_tokens=420,
+        )
+        data = _parse_json_loose(raw)
+        if not isinstance(data, dict):
+            data = {}
+        out: dict[str, Any] = {"ok": True}
+        if "gesture" in needs:
+            out["gesture"] = _occ_field(data.get("gesture"), "无明确手势")
+        if "expression" in needs:
+            out["expression"] = _occ_field(data.get("expression"), "中性")
+        if "body" in needs or "body_action" in needs:
+            out["body_action"] = _occ_field(
+                data.get("body_action") or data.get("body"), "未识别"
+            )
+        if "age" in needs:
+            out["age"] = _occ_field(data.get("age"), "未知")
+        if "gender" in needs:
+            out["gender"] = _occ_field(data.get("gender"), "未知")
+        return out
+    except Exception as e:
+        print(f"[Cockpit] /vision/occ_fallback: {e}", flush=True)
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
 
 
 from fastapi.staticfiles import StaticFiles
